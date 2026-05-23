@@ -37,6 +37,10 @@ if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
 fi
 
 check_tools() {
+  if ! command -v wine > /dev/null 2>&1; then
+    echo -e "${RED}Wine is not installed, cannot proceed.${NC}"
+  fi
+
   if ! command -v winetricks > /dev/null 2>&1; then
     echo -e "${RED}Winetricks is not installed, cannot proceed.${NC}"
   fi
