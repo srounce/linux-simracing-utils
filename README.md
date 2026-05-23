@@ -131,3 +131,9 @@ If you need to debug runtime issues, you can enable verbose output by setting `D
 ```bash
 DEBUG=1 bash install.sh
 ```
+
+---
+
+## Related projects
+
+- **[SimHub_on_Linux](https://github.com/srlemke/SimHub_on_Linux)** by [@srlemke](https://github.com/srlemke) — Provided initial inspiration for this project and was a helpful reference for various aspects of the processes involved. Big shoutout to @srlemke for his work on this.
