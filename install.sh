@@ -150,7 +150,7 @@ install_simhub() {
     | tr -d \" \
     | xargs curl -sL --fail > "${workdir}/simhub.zip"
   unzip -q -d "${workdir}/simhub" "${workdir}/simhub.zip"
-  wine ${workdir}/simhub/SimHubSetup*.exe /TASKS="desktopicon,usbdisplays,enablemotion,dashsandoverlays" /RESTARTAPPLICATIONS /VERYSILENT \
+  wine ${workdir}/simhub/SimHubSetup*.exe /TASKS="desktopicon,enablemotion,dashsandoverlays" /RESTARTAPPLICATIONS /VERYSILENT \
     >> "${LSU_LOGDIR}/simhub_setup.log" 2>&1
   rm -rf ${workdir}
 
