@@ -78,7 +78,7 @@ setup_prefix() {
 
   mkdir -p $WINEPREFIX
 
-  WINEDLLOVERRIDES="mscoree,mshtml=" wineboot --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  WINEDLLOVERRIDES="mscoree,mshtml=" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
 
   wine reg add 'HKCU\Software\Microsoft\Avalon.Graphics' /v DisableHWAcceleration /t REG_DWORD /d 1 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
 
