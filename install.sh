@@ -39,14 +39,38 @@ if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
   echo -e "${GREEN}Installer copied to ${TARGET_DIR}/install.sh${NC}"
 fi
 
+bindir="${TARGET_DIR}/bin"
+vardir="${TARGET_DIR}/var"
+mkdir -p "${bindir}" "${vardir}"
+
+export PATH="${bindir}:$PATH"
+
 check_tools() {
   if ! command -v wine > /dev/null 2>&1; then
     echo -e "${RED}Wine is not installed, cannot proceed.${NC}"
   fi
 
   if ! command -v winetricks > /dev/null 2>&1; then
-    echo -e "${RED}Winetricks is not installed, cannot proceed.${NC}"
+    # echo -e "${RED}Winetricks is not installed, cannot proceed.${NC}"
+    install_winetricks
   fi
+}
+
+install_winetricks() {
+  local workdir=$(mktemp -d)
+
+  mkdir "${vardir}/winetricks"
+
+  curl -sL --fail "https://api.github.com/repos/winetricks/winetricks/releases/latest" \
+    | grep "tarball_url" \
+    | cut -d : -f 2,3 \
+    | sed 's/[",]//g' \
+    | xargs curl -sL --fail > "${workdir}/winetricks.tar.gz"
+  tar -xzf "${workdir}/winetricks.tar.gz" -C "${vardir}/winetricks" --strip-components=1
+
+  rm -rf "${workdir}"
+
+  ln -s "${vardir}/winetricks/src/winetricks" "${bindir}/winetricks"
 }
 
 setup_prefix() {
@@ -275,9 +299,6 @@ check_winecarte() {
 
 install_winecarte() {
   local workdir=$(mktemp -d)
-  local bindir="${TARGET_DIR}/bin"
-
-  mkdir -p "${bindir}"
 
   if [[ $1 == "1" ]]; then
     echo -e "${CYAN}Updating Winecarte...${NC}"
@@ -323,10 +344,6 @@ For each supported game:
 }
 
 install_launch_wrapper() {
-  local bindir="${TARGET_DIR}/bin"
-
-  mkdir -p "${bindir}"
-
   cat > "${bindir}/lsu-launch-wrapper" << EOF
 #!/bin/bash
 
@@ -387,7 +404,6 @@ fix_desktop_launchers() {
 }
 
 patch_desktop_launcher() {
-  local bindir="${TARGET_DIR}/bin"
   local name="$1"
   local launcher_path="$2"
   
