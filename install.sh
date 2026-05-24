@@ -22,8 +22,10 @@ else
   export WINEDEBUG="-all"
 fi
 
-printf "${CYAN}Install directory: ${NC}"
-read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
+if [[ "$UNATTENDED" != "1" ]]; then
+  printf "${CYAN}Install directory: ${NC}"
+  read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
+fi
 
 LSU_LOGDIR="${TARGET_DIR}/log"
 WINEPREFIX="${TARGET_DIR}/pfx"
