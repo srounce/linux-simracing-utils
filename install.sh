@@ -30,7 +30,9 @@ else
   export WINEDEBUG="-all"
 fi
 
-if [[ "$UNATTENDED" != "1" ]]; then
+if [[ "$UNATTENDED" == "1" ]]; then
+  printf "${CYAN}Install directory:${NC} ${TARGET_DIR}"
+else
   printf "${CYAN}Install directory: ${NC}"
   read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
 fi
