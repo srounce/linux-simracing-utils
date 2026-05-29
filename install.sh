@@ -36,12 +36,11 @@ if [[ "$UNATTENDED" != "1" ]]; then
 fi
 
 LSU_LOGDIR="${TARGET_DIR}/log"
+mkdir -p ${LSU_LOGDIR}
 echo "" > "${LSU_LOGDIR}/prefix_setup.log"
 
 WINEPREFIX="${TARGET_DIR}/pfx"
 export WINEPREFIX
-
-mkdir -p ${LSU_LOGDIR}
 
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
