@@ -3,6 +3,7 @@
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
 : "${DEBUG:="0"}"
+: "${UNATTENDED:="0"}"
 : "${TARGET_DIR:="$SCRIPT_DIR"}"
 
 set -euo pipefail
@@ -23,8 +24,10 @@ else
   export WINEDEBUG="-all"
 fi
 
-printf "${CYAN}Install directory: ${NC}"
-read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
+if [[ "$UNATTENDED" != "1" ]]; then
+  printf "${CYAN}Install directory: ${NC}"
+  read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
+fi
 
 LSU_LOGDIR="${TARGET_DIR}/log"
 echo "" > "${LSU_LOGDIR}/prefix_setup.log"
@@ -131,6 +134,11 @@ check_simhub() {
     install_message="SimHub installation found, do you want to update SimHub?"
   fi
 
+  if [[ "$UNATTENDED" == "1" ]]; then
+    install_simhub $found_simhub
+    return
+  fi
+
   while true; do
     printf "${CYAN}"
     read -rp "$install_message [Y/n]" simhub_confirm
@@ -187,6 +195,11 @@ check_crewchief() {
   install_message="CrewChief installation not found, do you want to install CrewChief?"
   if [[ $found_crewchief == "1" ]]; then
     install_message="CrewChief installation found, do you want to update CrewChief?"
+  fi
+
+  if [[ "$UNATTENDED" == "1" ]]; then
+    install_crewchief $found_crewchief
+    return
   fi
 
   while true; do
@@ -249,6 +262,11 @@ check_winecarte() {
   install_message="Winecarte installation not found, do you want to install Winecarte?"
   if [[ $found_winecarte == "1" ]]; then
     install_message="Winecarte installation found, do you want to update Winecarte?"
+  fi
+
+  if [[ "$UNATTENDED" == "1" ]]; then
+    install_winecarte $found_winecarte
+    return
   fi
 
   while true; do
