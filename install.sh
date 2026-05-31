@@ -134,6 +134,7 @@ EOF
       echo -e "${RED}Installation failed for .Net 4.8:"
       cat $install_log
       echo -e "${NC}"
+      exit 1
     else
       echo -e "${GREEN}Successfully installed .Net 4.8${NC}"
     fi
