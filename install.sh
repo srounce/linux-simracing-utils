@@ -454,7 +454,9 @@ fix_desktop_launchers() {
 
   if [[ -d ~/.cache/menu-cache ]]; then
     rm -rf ~/.cache/menu-cache/* 2>/dev/null
-  elif ! run command -v update-desktop-database; then
+  fi
+
+  if ! run command -v update-desktop-database; then
     run update-desktop-database ~/.local/share/applications 2>/dev/null
   elif ! run command -v kbuildsycoca6; then
     run kbuildsycoca6 --noincremental 2>/dev/null
@@ -472,7 +474,7 @@ patch_desktop_launcher() {
   local launcher_path="$2"
   
   if [[ -f "$2" ]]; then
-    sed -i "s|^Exec=.* \"C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
+    sed -i "s|^Exec=.* \\(\"\\)\\?C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
   fi
 }
 
