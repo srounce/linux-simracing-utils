@@ -115,6 +115,7 @@ set_registry_entries() {
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "Enable SDL" /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "Map Controllers" /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "DisableInput" /t REG_DWORD /d 1 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "DisableHidraw" /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
 
   echo -e "${CYAN}Registry entries updated successfully${NC}"
 }
