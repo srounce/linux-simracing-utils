@@ -52,6 +52,24 @@ mkdir -p "${bindir}" "${vardir}"
 
 export PATH="${bindir}:$PATH"
 
+setup_silentwine() {
+  export SILENT_WINE=$(mktemp)
+  cat > $SILENT_WINE << 'EOF'
+#!/usr/bin/env bash
+export WINEDEBUG=-all
+exec wine "$@"
+EOF
+  chmod +x $SILENT_WINE
+}
+
+trap cleanup_tools SIGINT
+trap cleanup_tools SIGTERM
+trap cleanup_tools EXIT
+
+cleanup_tools() {
+  rm $SILENT_WINE
+}
+
 check_tools() {
   if ! run command -v wine; then
     echo -e "${RED}Wine is not installed, cannot proceed.${NC}"
@@ -113,16 +131,8 @@ check_dotnet() {
     [[ $(stat -c%s "$DOTNET_DIR/mscorlib.dll" 2> /dev/null) -lt 1000000 ]]
   then
     echo -e "${CYAN}Installing .Net 4.8...${NC}"
-    SILENT_WINE=$(mktemp)
-    cat > $SILENT_WINE << 'EOF'
-#!/usr/bin/env bash
-export WINEDEBUG=-all
-exec wine "$@"
-EOF
-    chmod +x $SILENT_WINE
-
     set +e
-    WINE=$SILENT_WINE run winetricks -q dotnet48 >> "${LSU_LOGDIR}/dotnet_install.log" 2>&1
+    WINE=$SILENT_WINE run winetricks -q dotnet48 > "${LSU_LOGDIR}/dotnet_install.log" 2>&1
     rm $SILENT_WINE
     set -e
 
@@ -434,6 +444,8 @@ patch_desktop_launcher() {
     sed -i "s|^Exec=.* \"C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
   fi
 }
+
+setup_silentwine
 
 check_tools
 
