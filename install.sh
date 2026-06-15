@@ -72,11 +72,19 @@ cleanup_tools() {
 
 check_tools() {
   if ! run command -v wine; then
-    echo -e "${RED}Wine is not installed, cannot proceed.${NC}"
+    echo -e "${RED}Wine is not installed, please install it with your package manager and re-run this script to proceed.${NC}"
+    exit 1
   fi
 
-  if [[ ! -L "${bindir}/winetricks" ]]; then
-    install_winetricks
+  if ! run command -v winetricks; then
+    echo -e "${RED}Winetricks is not installed, please install it with your package manager and re-run this script to proceed.${NC}"
+    exit 1
+  else
+    if ! winetricks --version 2> /dev/null | run grep -E '^(2026|2025)'; then
+      winetricks_version=$(winetricks --version 2> /dev/null | grep -Eo '^[0-9]+')
+      echo -e "${RED}Winetricks version is out of date, please update it and re-run this script to proceed.${NC}"
+      exit 1
+    fi
   fi
 }
 
