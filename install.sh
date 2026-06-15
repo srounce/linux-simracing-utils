@@ -62,6 +62,8 @@ EOF
   chmod +x $SILENT_WINE
 }
 
+setup_silentwine
+
 trap cleanup_tools SIGINT
 trap cleanup_tools SIGTERM
 trap cleanup_tools EXIT
@@ -449,6 +451,18 @@ fix_desktop_launchers() {
   patch_desktop_launcher \
     "CrewChief" \
     "$HOME/.local/share/applications/wine/Programs/CrewChiefV4.desktop"
+
+  if [[ -d ~/.cache/menu-cache ]]; then
+    rm -rf ~/.cache/menu-cache/* 2>/dev/null
+  elif ! run command -v update-desktop-database; then
+    run update-desktop-database ~/.local/share/applications 2>/dev/null
+  elif ! run command -v kbuildsycoca6; then
+    run kbuildsycoca6 --noincremental 2>/dev/null
+  elif ! run command -v kbuildsycoca5; then
+    run kbuildsycoca5 --noincremental 2>/dev/null
+  else
+    echo -e "${YELLOW}WARNING: Unsure how to refresh your desktop launcher entry cache, please do it manually.${NC}"
+  fi
   
   echo -e "${CYAN}Desktop launchers successfully patched.${NC}"
 }
@@ -461,8 +475,6 @@ patch_desktop_launcher() {
     sed -i "s|^Exec=.* \"C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
   fi
 }
-
-setup_silentwine
 
 check_tools
 
