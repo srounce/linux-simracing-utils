@@ -144,7 +144,6 @@ check_dotnet() {
     echo -e "${CYAN}Installing .Net 4.8...${NC}"
     set +e
     WINE=$SILENT_WINE run winetricks -q dotnet48 > "${LSU_LOGDIR}/dotnet_install.log" 2>&1
-    rm $SILENT_WINE
     set -e
 
     if [[ $? -gt 0 ]]; then
