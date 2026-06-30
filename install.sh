@@ -69,7 +69,7 @@ trap cleanup_tools SIGTERM
 trap cleanup_tools EXIT
 
 cleanup_tools() {
-  rm $SILENT_WINE
+  [ -e "$SILENT_WINE" ] && rm -r "$SILENT_WINE"
 }
 
 check_tools() {
