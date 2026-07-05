@@ -160,10 +160,10 @@ check_dotnet() {
   fi
 }
 
-check_allfonts() {
-  echo -e "${CYAN}Updating prefix allfonts installation...${NC}"
-  WINE=$SILENT_WINE run winetricks -q allfonts > "${LSU_LOGDIR}/allfonts_install.log" 2>&1
-  echo -e "${GREEN}Installation of allfonts is up to date.${NC}"
+check_corefonts() {
+  echo -e "${CYAN}Updating prefix corefonts installation...${NC}"
+  WINE=$SILENT_WINE run winetricks -q corefonts > "${LSU_LOGDIR}/corefonts_install.log" 2>&1
+  echo -e "${GREEN}Installation of corefonts is up to date.${NC}"
 }
 
 check_prefix() {
@@ -175,7 +175,7 @@ check_prefix() {
   
   check_dotnet
 
-  check_allfonts
+  check_corefonts
 }
 
 check_simhub() {
