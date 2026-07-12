@@ -456,13 +456,26 @@ fix_desktop_launchers() {
     rm -rf ~/.cache/menu-cache/* 2>/dev/null
   fi
 
+  local has_run="0"
+
   if ! run command -v update-desktop-database; then
     run update-desktop-database ~/.local/share/applications 2>/dev/null
-  elif ! run command -v kbuildsycoca6; then
+    has_run="1"
+  fi
+  if ! run command -v kbuildsycoca6; then
     run kbuildsycoca6 --noincremental 2>/dev/null
-  elif ! run command -v kbuildsycoca5; then
+    has_run="1"
+  fi
+  if ! run command -v kbuildsycoca5; then
     run kbuildsycoca5 --noincremental 2>/dev/null
-  else
+    has_run="1"
+  fi
+  if ! run command -v xdg-desktop-menu; then
+    run xdg-desktop-menu forceupdate 2>/dev/null
+    has_run="1"
+  fi
+
+  if [[ $has_run == "0" ]]; then
     echo -e "${YELLOW}WARNING: Unsure how to refresh your desktop launcher entry cache, please do it manually.${NC}"
   fi
   
