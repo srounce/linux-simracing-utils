@@ -36,6 +36,69 @@ else
   export WINEDEBUG="-all"
 fi
 
+check_self_update() {
+  if [[ "${LSU_SKIP_UPDATE:-0}" == "1" ]]; then
+    return
+  fi
+
+  local script_path="${SCRIPT_DIR}/${BASH_SOURCE[0]##*/}"
+  local remote_script=$(mktemp)
+
+  if ! curl -sL --fail \
+    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/master/install.sh" \
+    -o "$remote_script"
+  then
+    echo -e "${YELLOW}Unable to check for installer updates, continuing with the current version.${NC}"
+    rm -f "$remote_script"
+    return
+  fi
+
+  if cmp -s "$script_path" "$remote_script"; then
+    rm -f "$remote_script"
+    return
+  fi
+
+  update_confirm="Y"
+  if [[ "$UNATTENDED" != "1" ]]; then
+    while true; do
+      printf "${CYAN}"
+      read -rp "A new version of the installer is available, do you want to update? [Y/n]" update_confirm
+      printf "${NC}"
+      update_confirm="${update_confirm:-Y}"
+      if [[ "$update_confirm" =~ ^[YyNn]$ ]]; then
+        break
+      fi
+      echo "Please enter y or n."
+    done
+  fi
+
+  if [[ "$update_confirm" =~ ^[Yy]$ ]]; then
+    if [[ "$(git -C "$SCRIPT_DIR" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]; then
+      echo -e "${CYAN}Updating installer repository...${NC}"
+      if ! run git -C "$SCRIPT_DIR" pull --ff-only; then
+        echo -e "${YELLOW}Failed to update the installer repository (see ${LSU_LOGDIR}/install.log), continuing with the current version.${NC}"
+        rm -f "$remote_script"
+        return
+      fi
+    else
+      echo -e "${CYAN}Updating installer...${NC}"
+      cp "$remote_script" "$script_path"
+      chmod +x "$script_path"
+    fi
+    rm -f "$remote_script"
+    echo -e "${GREEN}Installer updated, restarting...${NC}"
+    exec env LSU_SKIP_UPDATE=1 \
+      DEBUG="$DEBUG" UNATTENDED="$UNATTENDED" TARGET_DIR="$TARGET_DIR" \
+      bash "$script_path"
+  fi
+
+  echo -e "${YELLOW}Skipping installer update.${NC}"
+  rm -f "$remote_script"
+  unset update_confirm
+}
+
+check_self_update
+
 if [[ "$UNATTENDED" == "1" ]]; then
   printf "${CYAN}Install directory:${NC} ${TARGET_DIR}"
 else
