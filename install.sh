@@ -22,7 +22,12 @@ echo "" > "${LSU_LOGDIR}/prefix_setup.log"
 echo "" > "${LSU_LOGDIR}/install.log"
 
 run() {
-  "$@" >> "${LSU_LOGDIR}/install.log" 2>&1
+  {
+    echo "---"
+    printf '%q ' "$@"
+    echo
+    "$@"
+  } >> "${LSU_LOGDIR}/install.log" 2>&1
 }
 
 if [[ $DEBUG == "1" ]]; then
