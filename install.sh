@@ -16,8 +16,13 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
+LSU_LOGDIR="${TARGET_DIR}/log"
+mkdir -p ${LSU_LOGDIR}
+echo "" > "${LSU_LOGDIR}/prefix_setup.log"
+echo "" > "${LSU_LOGDIR}/install.log"
+
 run() {
-  "$@" > "${LSU_LOGDIR}/install.log" 2>&1
+  "$@" >> "${LSU_LOGDIR}/install.log" 2>&1
 }
 
 if [[ $DEBUG == "1" ]]; then
@@ -32,10 +37,6 @@ else
   printf "${CYAN}Install directory: ${NC}"
   read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
 fi
-
-LSU_LOGDIR="${TARGET_DIR}/log"
-mkdir -p ${LSU_LOGDIR}
-echo "" > "${LSU_LOGDIR}/prefix_setup.log"
 
 WINEPREFIX="${TARGET_DIR}/pfx"
 export WINEPREFIX
@@ -136,21 +137,15 @@ check_dotnet() {
 
   DOTNET_DIR="$WINEPREFIX/drive_c/windows/Microsoft.NET/Framework/v4.0.30319"
 
-  local install_log=$(mktemp)
-
   if [[ ! -d "$DOTNET_DIR" ]] || \
     [[ ! -f "$DOTNET_DIR/mscorlib.dll" ]] || \
     [[ $(stat -c%s "$DOTNET_DIR/mscorlib.dll" 2> /dev/null) -lt 1000000 ]]
   then
     echo -e "${CYAN}Installing .Net 4.8...${NC}"
-    set +e
-    WINE=$SILENT_WINE run winetricks -q dotnet48 > "${LSU_LOGDIR}/dotnet_install.log" 2>&1
-    set -e
-
-    if [[ $? -gt 0 ]]; then
+    if ! WINE=$SILENT_WINE winetricks -q dotnet48 > "${LSU_LOGDIR}/dotnet_install.log" 2>&1; then
       echo -e "${RED}Installation failed for .Net 4.8:"
-      cat $install_log
-      echo -e "${NC}"
+      tail -n 50 "${LSU_LOGDIR}/dotnet_install.log"
+      echo -e "Full log: ${LSU_LOGDIR}/dotnet_install.log${NC}"
       exit 1
     else
       echo -e "${GREEN}Successfully installed .Net 4.8${NC}"
@@ -162,7 +157,12 @@ check_dotnet() {
 
 check_corefonts() {
   echo -e "${CYAN}Updating prefix corefonts installation...${NC}"
-  WINE=$SILENT_WINE run winetricks -q corefonts > "${LSU_LOGDIR}/corefonts_install.log" 2>&1
+  if ! WINE=$SILENT_WINE winetricks -q corefonts > "${LSU_LOGDIR}/corefonts_install.log" 2>&1; then
+    echo -e "${RED}Installation failed for corefonts:"
+    tail -n 50 "${LSU_LOGDIR}/corefonts_install.log"
+    echo -e "Full log: ${LSU_LOGDIR}/corefonts_install.log${NC}"
+    exit 1
+  fi
   echo -e "${GREEN}Installation of corefonts is up to date.${NC}"
 }
 
