@@ -161,6 +161,11 @@ check_dotnet() {
 }
 
 check_corefonts() {
+  if [[ -f "${WINEPREFIX}/drive_c/windows/Fonts/corefonts.installed" ]]; then
+    echo -e "${GREEN}Found existing corefonts install.${NC}"
+    return
+  fi
+
   echo -e "${CYAN}Updating prefix corefonts installation...${NC}"
   if ! WINE=$SILENT_WINE winetricks -q corefonts > "${LSU_LOGDIR}/corefonts_install.log" 2>&1; then
     echo -e "${RED}Installation failed for corefonts:"
