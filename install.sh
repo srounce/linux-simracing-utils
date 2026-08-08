@@ -36,6 +36,82 @@ else
   export WINEDEBUG="-all"
 fi
 
+# $2 is the answer a bare Enter gives, and picks which letter the hint
+# capitalises. Returns 0 for yes.
+confirm() {
+  local message="$1"
+  local default="${2:-Y}"
+  local hint="[Y/n]"
+  local reply
+
+  [[ "$default" == "N" ]] && hint="[y/N]"
+
+  while true; do
+    printf "${CYAN}"
+    read -rp "${message} ${hint} " reply
+    printf "${NC}"
+    reply="${reply:-$default}"
+    case "$reply" in
+      [Yy]) return 0 ;;
+      [Nn]) return 1 ;;
+      *) echo "Please enter y or n." ;;
+    esac
+  done
+}
+
+# Upstream version lookups. Each echoes an empty string when the release data
+# cannot be fetched, which callers treat as "version unknown" rather than fatal.
+github_latest_tag() {
+  curl -sL --fail "https://api.github.com/repos/$1/releases/latest" 2> /dev/null \
+    | grep -m1 '"tag_name"' \
+    | cut -d '"' -f 4 \
+    || true
+}
+
+# Unlike /releases/latest this includes prereleases, since /releases is ordered
+# newest-first regardless of the prerelease flag.
+github_newest_tag() {
+  curl -sL --fail "https://api.github.com/repos/$1/releases" 2> /dev/null \
+    | grep -m1 '"tag_name"' \
+    | cut -d '"' -f 4 \
+    || true
+}
+
+gitlab_latest_tag() {
+  curl -sL --fail "https://gitlab.com/api/v4/projects/$1/repository/tags?per_page=1" 2> /dev/null \
+    | grep -m1 '"name"' \
+    | cut -d '"' -f 4 \
+    || true
+}
+
+github_release_asset_url() {
+  curl -sL --fail "https://api.github.com/repos/$1/releases/tags/$2" 2> /dev/null \
+    | grep -m1 "browser_download_url" \
+    | cut -d '"' -f 4 \
+    || true
+}
+
+# Picks the wording and the safe default from what is installed against what is
+# available upstream. An unknown upstream version degrades to repair wording
+# rather than claiming the install is current.
+confirm_component() {
+  local name="$1" installed="$2" target="$3"
+
+  if [[ -z "$installed" ]]; then
+    echo -e "${CYAN}${name} is not installed.${NC}"
+    confirm "Install ${name}?" Y
+  elif [[ -z "$target" ]]; then
+    echo -e "${CYAN}${name} ${installed} is installed.${NC}"
+    confirm "Reinstall/repair ${name}?" N
+  elif [[ "$installed" == "$target" ]]; then
+    echo -e "${CYAN}${name} ${installed} is installed and up to date.${NC}"
+    confirm "Reinstall/repair ${name}?" N
+  else
+    echo -e "${CYAN}${name} ${installed} is installed, ${target} is available.${NC}"
+    confirm "Update ${name}?" Y
+  fi
+}
+
 check_self_update() {
   if [[ "${LSU_SKIP_UPDATE:-0}" == "1" ]]; then
     return
@@ -58,21 +134,9 @@ check_self_update() {
     return
   fi
 
-  update_confirm="Y"
-  if [[ "$UNATTENDED" != "1" ]]; then
-    while true; do
-      printf "${CYAN}"
-      read -rp "A new version of the installer is available, do you want to update? [Y/n]" update_confirm
-      printf "${NC}"
-      update_confirm="${update_confirm:-Y}"
-      if [[ "$update_confirm" =~ ^[YyNn]$ ]]; then
-        break
-      fi
-      echo "Please enter y or n."
-    done
-  fi
-
-  if [[ "$update_confirm" =~ ^[Yy]$ ]]; then
+  if [[ "$UNATTENDED" == "1" ]] \
+    || confirm "A new version of the installer is available, do you want to update?" Y
+  then
     if [[ "$(git -C "$SCRIPT_DIR" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]; then
       echo -e "${CYAN}Updating installer repository...${NC}"
       if ! run git -C "$SCRIPT_DIR" pull --ff-only; then
@@ -94,7 +158,6 @@ check_self_update() {
 
   echo -e "${YELLOW}Skipping installer update.${NC}"
   rm -f "$remote_script"
-  unset update_confirm
 }
 
 check_self_update
@@ -251,47 +314,39 @@ check_prefix() {
   check_corefonts
 }
 
+# SimHub maintains this itself and it is verbatim the upstream release tag, so
+# it stays accurate even for installs this script did not perform. reg query
+# reports CRLF, and the stray carriage return would defeat the version compare.
+simhub_installed_version() {
+  wine reg query 'HKCU\Software\SimHub' /v LastInstalledVersion 2> /dev/null \
+    | tr -d '\r' \
+    | awk '/LastInstalledVersion/ { print $NF }' \
+    || true
+}
+
 check_simhub() {
   echo -e "${CYAN}Checking for existing SimHub installation...${NC}"
 
-  found_simhub=0
-  if run wine reg query 'HKCU\Software\SimHub' '/v' 'LastInstalledVersion'; then
-    found_simhub=1
-  fi
-
-  install_message="SimHub installation not found, do you want to install SimHub?"
-  if [[ $found_simhub == "1" ]]; then
-    install_message="SimHub installation found, do you want to update SimHub?"
-  fi
+  local installed target
+  installed="$(simhub_installed_version)"
+  target="$(github_latest_tag SHWotever/simhub)"
 
   if [[ "$UNATTENDED" == "1" ]]; then
-    install_simhub $found_simhub
+    install_simhub "$installed"
     return
   fi
 
-  while true; do
-    printf "${CYAN}"
-    read -rp "$install_message [Y/n]" simhub_confirm
-    printf "${NC}"
-    simhub_confirm="${simhub_confirm:-Y}"
-    if [[ "$simhub_confirm" =~ ^[Yy]$ ]]; then
-      install_simhub $found_simhub
-      break
-    elif [[ "$simhub_confirm" =~ ^[Nn]$ ]]; then
-      echo -e "${YELLOW}Skipping SimHub installation${NC}"
-      break
-    else
-      echo "Please enter y or n."
-    fi 
-  done
-
-  unset simhub_confirm
+  if confirm_component "SimHub" "$installed" "$target"; then
+    install_simhub "$installed"
+  else
+    echo -e "${YELLOW}Skipping SimHub installation${NC}"
+  fi
 }
 
 install_simhub() {
   local workdir=$(mktemp -d)
 
-  if [[ $1 == "1" ]]; then
+  if [[ -n "$1" ]]; then
     echo -e "${CYAN}Updating SimHub...${NC}"
   else
     echo -e "${CYAN}Installing SimHub...${NC}"
@@ -307,54 +362,53 @@ install_simhub() {
     >> "${LSU_LOGDIR}/simhub_setup.log" 2>&1
   rm -rf ${workdir}
 
-  if [[ $1 == "1" ]]; then
+  if [[ -n "$1" ]]; then
     echo -e "${GREEN}SimHub successfully updated.${NC}"
   else
     echo -e "${GREEN}SimHub successfully installed.${NC}"
   fi
 }
 
+CREWCHIEF_DIR="drive_c/CrewChiefV4"
+CREWCHIEF_GITLAB_PROJECT="mr_belowski%2FCrewChiefV4"
+
+# The msi is served unversioned, so the tag that was current at install time is
+# recorded alongside the install rather than read back out of it.
+crewchief_installed_version() {
+  local marker="${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
+
+  [[ -f "${WINEPREFIX}/${CREWCHIEF_DIR}/CrewChiefV4.exe" ]] || return 0
+
+  if [[ -f "$marker" ]]; then
+    cat "$marker"
+  else
+    echo "(unknown version)"
+  fi
+}
+
 check_crewchief() {
   echo -e "${CYAN}Checking for existing CrewChief installation...${NC}"
 
-  found_crewchief=0
-  if [[ -f "${WINEPREFIX}/drive_c/CrewChiefV4/CrewChiefV4.exe" ]]; then
-    found_crewchief=1
-  fi
-
-  install_message="CrewChief installation not found, do you want to install CrewChief?"
-  if [[ $found_crewchief == "1" ]]; then
-    install_message="CrewChief installation found, do you want to update CrewChief?"
-  fi
+  local installed target
+  installed="$(crewchief_installed_version)"
+  target="$(gitlab_latest_tag "$CREWCHIEF_GITLAB_PROJECT")"
 
   if [[ "$UNATTENDED" == "1" ]]; then
-    install_crewchief $found_crewchief
+    install_crewchief "$installed" "$target"
     return
   fi
 
-  while true; do
-    printf "${CYAN}"
-    read -rp "$install_message [Y/n]" crewchief_confirm
-    printf "${NC}"
-    crewchief_confirm="${crewchief_confirm:-Y}"
-    if [[ "$crewchief_confirm" =~ ^[Yy]$ ]]; then
-      install_crewchief $found_crewchief
-      break
-    elif [[ "$crewchief_confirm" =~ ^[Nn]$ ]]; then
-      echo -e "${YELLOW}Skipping CrewChief installation${NC}"
-      break
-    else
-      echo "Please enter y or n."
-    fi 
-  done
-
-  unset crewchief_confirm
+  if confirm_component "CrewChief" "$installed" "$target"; then
+    install_crewchief "$installed" "$target"
+  else
+    echo -e "${YELLOW}Skipping CrewChief installation${NC}"
+  fi
 }
 
 install_crewchief() {
   local workdir=$(mktemp -d)
 
-  if [[ $1 == "1" ]]; then
+  if [[ -n "$1" ]]; then
     echo -e "${CYAN}Updating CrewChief...${NC}"
   else
     echo -e "${CYAN}Installing CrewChief...${NC}"
@@ -374,75 +428,114 @@ install_crewchief() {
   wine msiexec /i "${workdir}/CrewChiefV4.msi" /qn /l*v "$LSU_LOGDIR/cc_install.log" \
     INSTALLFOLDER='C:\CrewChiefV4'
 
-  if [[ $1 == "1" ]]; then
+  rm -rf ${workdir}
+
+  if [[ ! -f "${WINEPREFIX}/${CREWCHIEF_DIR}/CrewChiefV4.exe" ]]; then
+    echo -e "${RED}Installation failed for CrewChief, see ${LSU_LOGDIR}/cc_install.log${NC}"
+    exit 1
+  fi
+
+  # Without a known tag the marker would keep asserting a version this install
+  # can no longer vouch for.
+  if [[ -n "$2" ]]; then
+    echo "$2" > "${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
+  else
+    rm -f "${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
+  fi
+
+  if [[ -n "$1" ]]; then
     echo -e "${GREEN}CrewChief successfully updated.${NC}"
   else
     echo -e "${GREEN}CrewChief successfully installed.${NC}"
   fi
 }
 
+WINECARTE_REPO="srounce/winecarte"
+
+# The release tarball carries no version of its own, so the tag it came from is
+# recorded next to the binaries it unpacks.
+winecarte_installed_version() {
+  local marker="${bindir}/.winecarte-version"
+
+  [[ -f "${bindir}/winecarte-run" ]] || return 0
+
+  if [[ -f "$marker" ]]; then
+    cat "$marker"
+  else
+    echo "(unknown version)"
+  fi
+}
+
+# Stable releases only by default. LSU_WINECARTE_VERSION pins an exact tag and
+# LSU_WINECARTE_PRERELEASE takes the newest release of any kind, so testers can
+# follow the alphas without editing the installer.
+winecarte_target_version() {
+  if [[ -n "${LSU_WINECARTE_VERSION:-}" ]]; then
+    echo "${LSU_WINECARTE_VERSION}"
+  elif [[ "${LSU_WINECARTE_PRERELEASE:-0}" == "1" ]]; then
+    github_newest_tag "$WINECARTE_REPO"
+  else
+    github_latest_tag "$WINECARTE_REPO"
+  fi
+}
+
 check_winecarte() {
   echo -e "${CYAN}Checking for existing Winecarte installation...${NC}"
 
-  found_winecarte=0
-  if [[ ! -f "${TARGET_DIR}/bin/winecarte}" ]]; then
-    found_winecarte=1
-  fi
-
-  install_message="Winecarte installation not found, do you want to install Winecarte?"
-  if [[ $found_winecarte == "1" ]]; then
-    install_message="Winecarte installation found, do you want to update Winecarte?"
-  fi
+  local installed target
+  installed="$(winecarte_installed_version)"
+  target="$(winecarte_target_version)"
 
   if [[ "$UNATTENDED" == "1" ]]; then
-    install_winecarte $found_winecarte
+    install_winecarte "$installed" "$target"
     return
   fi
 
-  while true; do
-    printf "${CYAN}"
-    read -rp "$install_message [Y/n]" winecarte_confirm
-    printf "${NC}"
-    winecarte_confirm="${winecarte_confirm:-Y}"
-    if [[ "$winecarte_confirm" =~ ^[Yy]$ ]]; then
-      install_winecarte $found_winecarte
-      break
-    elif [[ "$winecarte_confirm" =~ ^[Nn]$ ]]; then
-      echo -e "${YELLOW}Skipping Winecarte installation${NC}"
-      break
-    else
-      echo "Please enter y or n."
-    fi 
-  done
-
-  unset winecarte_confirm
+  if confirm_component "Winecarte" "$installed" "$target"; then
+    install_winecarte "$installed" "$target"
+  else
+    echo -e "${YELLOW}Skipping Winecarte installation${NC}"
+  fi
 }
 
 install_winecarte() {
+  local installed="$1"
+  local target="$2"
   local workdir=$(mktemp -d)
+  local asset_url
 
   mkdir -p "${bindir}"
 
-  if [[ $1 == "1" ]]; then
+  if [[ -n "$installed" ]]; then
     echo -e "${CYAN}Updating Winecarte...${NC}"
   else
-    echo -e "${CYAN}Install Winecarte...${NC}"
+    echo -e "${CYAN}Installing Winecarte...${NC}"
   fi
 
-  mkdir "${workdir}/winecarte"
-  curl -sL --fail "https://api.github.com/repos/srounce/winecarte/releases/328602520" \
-    | grep "browser_download_url" \
-    | cut -d : -f 2,3 \
-    | tr -d \" \
-    | xargs curl -sL --fail > "${workdir}/winecarte.tar.gz"
+  if [[ -z "$target" ]]; then
+    echo -e "${RED}Unable to determine which Winecarte release to install, skipping.${NC}"
+    rm -rf ${workdir}
+    return
+  fi
+
+  asset_url="$(github_release_asset_url "$WINECARTE_REPO" "$target")"
+  if [[ -z "$asset_url" ]]; then
+    echo -e "${RED}No Winecarte release found for ${target}, skipping.${NC}"
+    rm -rf ${workdir}
+    return
+  fi
+
+  curl -sL --fail "$asset_url" > "${workdir}/winecarte.tar.gz"
   tar -xzf "${workdir}/winecarte.tar.gz" -C "${bindir}" --strip-components=1
 
   rm -rf ${workdir}
 
-  if [[ $1 == "1" ]]; then
-    echo -e "${GREEN}Winecarte successfully updated.${NC}"
+  echo "$target" > "${bindir}/.winecarte-version"
+
+  if [[ -n "$installed" ]]; then
+    echo -e "${GREEN}Winecarte ${target} successfully updated.${NC}"
   else
-    echo -e "${GREEN}Winecarte successfully installed.${NC}"
+    echo -e "${GREEN}Winecarte ${target} successfully installed.${NC}"
   fi
 }
 

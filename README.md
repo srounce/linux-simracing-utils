@@ -98,7 +98,14 @@ Re-run the installer at any time to update to the latest versions:
 bash install.sh
 ```
 
-It detects what's already installed and offers to update each component rather than reinstalling from scratch. You can update just one app and skip the others.
+It checks the installed version of each component against the latest release and only offers an update when there actually is one. Anything already up to date is offered as a reinstall/repair instead, and pressing Enter skips it, so a re-run costs nothing if you only need the launchers fixing up.
+
+To follow Winecarte prereleases, or to pin a specific release:
+
+```bash
+LSU_WINECARTE_PRERELEASE=1 bash install.sh
+LSU_WINECARTE_VERSION=v0.4.0 bash install.sh
+```
 
 ---
 
