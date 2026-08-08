@@ -517,17 +517,8 @@ EOF
 fix_desktop_launchers() {
   echo -e "${CYAN}Patching desktop launchers...${NC}"
 
-  patch_desktop_launcher \
-    "SimHub" \
-    "$HOME/.local/share/applications/wine/Programs/SimHub/SimHub.desktop"
-
-  patch_desktop_launcher \
-    "CrewChief" \
-    "$HOME/.local/share/applications/wine/Programs/CrewChiefV4.desktop"
-
-  if [[ -d ~/.cache/menu-cache ]]; then
-    rm -rf ~/.cache/menu-cache/* 2>/dev/null
-  fi
+  patch_desktop_launchers_in "$HOME/.local/share/applications/wine/Programs"
+  patch_desktop_launchers_in "$(xdg_desktop_dir)"
 
   local has_run="0"
 
@@ -555,13 +546,51 @@ fix_desktop_launchers() {
   echo -e "${CYAN}Desktop launchers successfully patched.${NC}"
 }
 
-patch_desktop_launcher() {
-  local name="$1"
-  local launcher_path="$2"
-  
-  if [[ -f "$2" ]]; then
-    sed -i "s|^Exec=.* \\(\"\\)\\?C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
+xdg_desktop_dir() {
+  local desktop_dir
+  desktop_dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+  if [[ -z "$desktop_dir" || "$desktop_dir" == "$HOME" ]]; then
+    desktop_dir="$HOME/Desktop"
   fi
+  printf '%s' "$desktop_dir"
+}
+
+# A launcher is ours if wine generated it against our prefix, or if an earlier
+# install already wrapped it. Matching wrapped entries as well means a reinstall
+# to a different TARGET_DIR repoints them.
+is_lsu_launcher() {
+  local launcher_path="$1"
+
+  grep -qE "^Exec=.*(${WINEPREFIX}|lsu-launch-wrapper)" "$launcher_path"
+}
+
+# Wine writes Exec lines of the form:
+#   Exec=env "WINEPREFIX=<prefix>" wine "C:\\Program Files\\App\\App.exe"
+# Everything ahead of the Windows path is replaced by the launch wrapper so the
+# app runs under winehub.
+patch_desktop_launcher() {
+  local launcher_path="$1"
+
+  sed -i "s|^Exec=.* \\(\"\\)\\?C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
+}
+
+# Launchers are discovered by scanning rather than named individually, so every
+# entry the wine installers generate is covered.
+patch_desktop_launchers_in() {
+  local root="$1"
+  local launcher_path
+
+  [[ -d "$root" ]] || return 0
+
+  shopt -s globstar
+
+  for launcher_path in "$root"/**/*.desktop; do
+    [[ -f "$launcher_path" ]] || continue
+
+    if is_lsu_launcher "$launcher_path"; then
+      patch_desktop_launcher "$launcher_path"
+    fi
+  done
 }
 
 check_tools
