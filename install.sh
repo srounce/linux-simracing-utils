@@ -256,6 +256,10 @@ set_registry_entries() {
 
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "Enable SDL"       /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "Map Controllers"  /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+
+  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f
+  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f
+
   wine reg delete "HKLM\System\CurrentControlSet\Services\winebus" /v "DisableInput"  /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1 || true
   wine reg delete "HKLM\System\CurrentControlSet\Services\winebus" /v "EnableHidraw"  /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1 || true
   wine reg delete "HKLM\System\CurrentControlSet\Services\winebus" /v "DisableHidraw" /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1 || true
@@ -286,6 +290,28 @@ check_dotnet() {
   fi
 }
 
+# Both dotnetcore3 and dotnetcoredesktop3 drop the same dotnet.exe, so only the
+# shared framework directory tells them apart. On a 64-bit prefix winetricks
+# installs the x86 build alongside, under Program Files (x86); either build
+# landing in Program Files is enough to call the verb done.
+check_dotnetcore() {
+  local verb="$1" framework="$2" label="$3"
+
+  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/3.1.*" > /dev/null; then
+    echo -e "${GREEN}Found existing ${label} install.${NC}"
+    return
+  fi
+
+  echo -e "${CYAN}Installing ${label}...${NC}"
+  if ! WINE=$SILENT_WINE winetricks -q "${verb}" > "${LSU_LOGDIR}/${verb}_install.log" 2>&1; then
+    echo -e "${RED}Installation failed for ${label}:"
+    tail -n 50 "${LSU_LOGDIR}/${verb}_install.log"
+    echo -e "Full log: ${LSU_LOGDIR}/${verb}_install.log${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}Successfully installed ${label}${NC}"
+}
+
 check_corefonts() {
   if [[ -f "${WINEPREFIX}/drive_c/windows/Fonts/corefonts.installed" ]]; then
     echo -e "${GREEN}Found existing corefonts install.${NC}"
@@ -310,6 +336,10 @@ check_prefix() {
   set_registry_entries
   
   check_dotnet
+
+  check_dotnetcore dotnetcore3 Microsoft.NETCore.App ".Net Core Runtime 3.1"
+
+  check_dotnetcore dotnetcoredesktop3 Microsoft.WindowsDesktop.App ".Net Core Desktop Runtime 3.1"
 
   check_corefonts
 }
