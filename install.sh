@@ -307,14 +307,14 @@ check_dotnet() {
   fi
 }
 
-# Both dotnetcore3 and dotnetcoredesktop3 drop the same dotnet.exe, so only the
-# shared framework directory tells them apart. On a 64-bit prefix winetricks
-# installs the x86 build alongside, under Program Files (x86); either build
-# landing in Program Files is enough to call the verb done.
-check_dotnetcore() {
-  local verb="$1" framework="$2" label="$3"
+# Every dotnet runtime verb drops the same dotnet.exe, so only the shared
+# framework directory and its version tell them apart. On a 64-bit prefix
+# winetricks installs the x86 build alongside, under Program Files (x86);
+# either build landing in Program Files is enough to call the verb done.
+check_dotnet_runtime() {
+  local verb="$1" framework="$2" version="$3" label="$4"
 
-  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/3.1.*" > /dev/null; then
+  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/${version}.*" > /dev/null; then
     echo -e "${GREEN}Found existing ${label} install.${NC}"
     return
   fi
@@ -354,9 +354,11 @@ check_prefix() {
   
   check_dotnet
 
-  check_dotnetcore dotnetcore3 Microsoft.NETCore.App ".Net Core Runtime 3.1"
+  check_dotnet_runtime dotnetcore3 Microsoft.NETCore.App 3.1 ".Net Core Runtime 3.1"
 
-  check_dotnetcore dotnetcoredesktop3 Microsoft.WindowsDesktop.App ".Net Core Desktop Runtime 3.1"
+  check_dotnet_runtime dotnetcoredesktop3 Microsoft.WindowsDesktop.App 3.1 ".Net Core Desktop Runtime 3.1"
+
+  check_dotnet_runtime dotnetdesktop8 Microsoft.WindowsDesktop.App 8.0 ".Net Desktop Runtime 8.0"
 
   check_corefonts
 }
