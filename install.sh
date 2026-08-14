@@ -220,6 +220,23 @@ check_tools() {
       exit 1
     fi
   fi
+
+  pin_winetricks_wine_arch
+}
+
+# Winetricks decides a 64-bit prefix is in new-wow64 mode by comparing the ELF
+# class of the wine and wineserver binaries. Where wine ships as a wrapper
+# script the read yields nothing, so it looks for the wine64 that wine 11 no
+# longer has, ends up with an empty WINE_ARCH and dies on "cmd.exe /c echo
+# '%AppData%' returned empty string". WINE64 is checked before any of that.
+pin_winetricks_wine_arch() {
+  [[ -n "${WINE64:-}" ]] && return
+
+  if command -v wine64 > /dev/null 2>&1; then
+    export WINE64="$(command -v wine64)"
+  else
+    export WINE64="$SILENT_WINE"
+  fi
 }
 
 install_winetricks() {
