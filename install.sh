@@ -329,42 +329,40 @@ check_dotnet_runtime() {
   echo -e "${GREEN}Successfully installed ${label}${NC}"
 }
 
-# Winetricks has no aspnetcore verb, so this runtime is fetched straight from
-# Microsoft's release index. Apps built against 8.0.0 roll forward onto whatever
-# 8.0 patch this resolves to.
-aspnetcore8_target_version() {
+# Winetricks pins its .Net 8 verbs to an old patch and has no aspnetcore verb at
+# all, so the 8.0 runtimes come straight from Microsoft's release index instead.
+# A runtimeconfig naming an exact patch only ever rolls forward, so a prefix
+# holding nothing but an older patch cannot run the app at all.
+dotnet8_target_version() {
   curl -sL --fail "https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json" 2> /dev/null \
     | grep -m1 '"latest-runtime"' \
     | cut -d '"' -f 4 \
     || true
 }
 
-check_aspnetcore8() {
-  local label="ASP.Net Core Runtime 8.0"
+# Detection is on the exact patch directory rather than the 8.0 series, so a
+# prefix carrying only an older patch gets brought up to the current one.
+check_dotnet8_bundle() {
+  local segment="$1" bundle="$2" framework="$3" label="$4"
+  local version="$DOTNET8_VERSION"
+  local logfile="${LSU_LOGDIR}/${bundle}_install.log"
+  local workdir arch installer url
 
-  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/Microsoft.AspNetCore.App/8.0.*" > /dev/null; then
-    echo -e "${GREEN}Found existing ${label} install.${NC}"
+  if [[ -d "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/${version}" ]]; then
+    echo -e "${GREEN}Found existing ${label} ${version} install.${NC}"
     return
-  fi
-
-  local version workdir arch installer url
-  version="$(aspnetcore8_target_version)"
-
-  if [[ -z "$version" ]]; then
-    echo -e "${RED}Unable to determine which ${label} release to install.${NC}"
-    exit 1
   fi
 
   workdir=$(mktemp -d)
 
-  echo -e "${CYAN}Installing ${label} (${version})...${NC}"
-  echo "" > "${LSU_LOGDIR}/aspnetcore8_install.log"
+  echo -e "${CYAN}Installing ${label} ${version}...${NC}"
+  echo "" > "$logfile"
 
   # x86 first so the x64 build lands last and owns the shared install state on a
   # 64-bit prefix, which is the order the winetricks dotnet verbs use.
   for arch in x86 x64; do
-    installer="aspnetcore-runtime-${version}-win-${arch}.exe"
-    url="https://builds.dotnet.microsoft.com/dotnet/aspnetcore/Runtime/${version}/${installer}"
+    installer="${bundle}-${version}-win-${arch}.exe"
+    url="https://builds.dotnet.microsoft.com/dotnet/${segment}/${version}/${installer}"
 
     if ! curl -sL --fail -o "${workdir}/${installer}" "$url"; then
       echo -e "${RED}Failed to download ${label} (${arch}) from ${url}${NC}"
@@ -372,17 +370,17 @@ check_aspnetcore8() {
       exit 1
     fi
 
-    if ! wine "${workdir}/${installer}" /quiet >> "${LSU_LOGDIR}/aspnetcore8_install.log" 2>&1; then
+    if ! wine "${workdir}/${installer}" /quiet >> "$logfile" 2>&1; then
       echo -e "${RED}Installation failed for ${label} (${arch}):"
-      tail -n 50 "${LSU_LOGDIR}/aspnetcore8_install.log"
-      echo -e "Full log: ${LSU_LOGDIR}/aspnetcore8_install.log${NC}"
+      tail -n 50 "$logfile"
+      echo -e "Full log: ${logfile}${NC}"
       rm -rf "$workdir"
       exit 1
     fi
   done
 
   rm -rf "$workdir"
-  echo -e "${GREEN}Successfully installed ${label} (${version})${NC}"
+  echo -e "${GREEN}Successfully installed ${label} ${version}${NC}"
 }
 
 check_corefonts() {
@@ -414,9 +412,20 @@ check_prefix() {
 
   check_dotnet_runtime dotnetcoredesktop3 Microsoft.WindowsDesktop.App 3.1 ".Net Core Desktop Runtime 3.1"
 
-  check_dotnet_runtime dotnetdesktop8 Microsoft.WindowsDesktop.App 8.0 ".Net Desktop Runtime 8.0"
+  # Resolved once, ahead of the installs, so an unreachable index fails before
+  # any of the three bundles is touched rather than part way through.
+  DOTNET8_VERSION="$(dotnet8_target_version)"
 
-  check_aspnetcore8
+  if [[ -z "$DOTNET8_VERSION" ]]; then
+    echo -e "${RED}Unable to determine which .Net 8.0 release to install.${NC}"
+    exit 1
+  fi
+
+  check_dotnet8_bundle Runtime dotnet-runtime Microsoft.NETCore.App ".Net Runtime 8.0"
+
+  check_dotnet8_bundle WindowsDesktop windowsdesktop-runtime Microsoft.WindowsDesktop.App ".Net Desktop Runtime 8.0"
+
+  check_dotnet8_bundle aspnetcore/Runtime aspnetcore-runtime Microsoft.AspNetCore.App "ASP.Net Core Runtime 8.0"
 
   check_corefonts
 }
