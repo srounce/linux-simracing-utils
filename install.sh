@@ -723,11 +723,16 @@ cleanup_stale_pids() {
 
 cleanup_stale_pids
 
+# The app is backgrounded only so the winehub manager can start alongside it;
+# the wrapper still waits so stdout/stderr and the exit status behave as if wine
+# were run directly.
 if [ ! -f "\$WINEHUB_PIDFILE" ] || ! kill -0 "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null; then
   wine "\$@" &
+  wine_pid=\$!
   "${bindir}/lsu-winehub-manager" &
+  wait "\$wine_pid"
 else
-  wine "\$@"
+  exec wine "\$@"
 fi
 EOF
   chmod +x "${bindir}/lsu-launch-wrapper"
