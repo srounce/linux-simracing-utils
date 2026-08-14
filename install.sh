@@ -196,12 +196,15 @@ EOF
 
 setup_silentwine
 
+DOTNET_INDEX_DIR=$(mktemp -d)
+
 trap cleanup_tools SIGINT
 trap cleanup_tools SIGTERM
 trap cleanup_tools EXIT
 
 cleanup_tools() {
-  [ -e "$SILENT_WINE" ] && rm -r "$SILENT_WINE"
+  rm -f "$SILENT_WINE"
+  rm -rf "${DOTNET_INDEX_DIR}"
 }
 
 check_tools() {
@@ -329,24 +332,54 @@ check_dotnet_runtime() {
   echo -e "${GREEN}Successfully installed ${label}${NC}"
 }
 
-# Winetricks pins its .Net 8 verbs to an old patch and has no aspnetcore verb at
-# all, so the 8.0 runtimes come straight from Microsoft's release index instead.
-# A runtimeconfig naming an exact patch only ever rolls forward, so a prefix
-# holding nothing but an older patch cannot run the app at all.
-dotnet8_target_version() {
-  curl -sL --fail "https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json" 2> /dev/null \
-    | grep -m1 '"latest-runtime"' \
-    | cut -d '"' -f 4 \
-    || true
+# Winetricks pins old patches and has no aspnetcore verb. Apps that ask for an
+# exact patch only roll forward onto newer ones, so these runtimes come from
+# Microsoft's release index instead.
+dotnet_index() {
+  local channel="$1"
+  local index="${DOTNET_INDEX_DIR}/${channel}.json"
+
+  if [[ ! -f "$index" ]] && ! curl -sL --fail \
+    "https://builds.dotnet.microsoft.com/dotnet/release-metadata/${channel}/releases.json" \
+    -o "$index"
+  then
+    echo -e "${RED}Unable to fetch the .Net ${channel} release index.${NC}" >&2
+    return 1
+  fi
+
+  echo "$index"
 }
 
-# Detection is on the exact patch directory rather than the 8.0 series, so a
-# prefix carrying only an older patch gets brought up to the current one.
-check_dotnet8_bundle() {
-  local segment="$1" bundle="$2" framework="$3" label="$4"
-  local version="$DOTNET8_VERSION"
-  local logfile="${LSU_LOGDIR}/${bundle}_install.log"
-  local workdir arch installer url
+# Releases are listed newest first, so the first match is the current one.
+dotnet_installer_url() {
+  local channel="$1" bundle="$2" arch="$3" index
+
+  index="$(dotnet_index "$channel")" || exit 1
+
+  grep -m1 -o "https://[^\"]*/${bundle}-[0-9.]*-win-${arch}\.exe" "$index" || true
+}
+
+dotnet_installer_version() {
+  local installer="${1##*/}" bundle="$2"
+
+  installer="${installer#"${bundle}"-}"
+  echo "${installer%-win-*}"
+}
+
+# Matches the exact patch, not the series, so old patches get updated.
+check_dotnet_bundle() {
+  local channel="$1" bundle="$2" framework="$3" label="$4"
+  local logfile="${LSU_LOGDIR}/${bundle}-${channel}_install.log"
+  local version workdir arch installer url
+
+  url="$(dotnet_installer_url "$channel" "$bundle" x64)"
+
+  if [[ -z "$url" ]]; then
+    echo -e "${RED}No ${label} installer listed in the .Net ${channel} release index.${NC}"
+    exit 1
+  fi
+
+  version="$(dotnet_installer_version "$url" "$bundle")"
 
   if [[ -d "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/${version}" ]]; then
     echo -e "${GREEN}Found existing ${label} ${version} install.${NC}"
@@ -358,11 +391,16 @@ check_dotnet8_bundle() {
   echo -e "${CYAN}Installing ${label} ${version}...${NC}"
   echo "" > "$logfile"
 
-  # x86 first so the x64 build lands last and owns the shared install state on a
-  # 64-bit prefix, which is the order the winetricks dotnet verbs use.
+  # x86 first so the x64 build lands last, like the winetricks verbs.
   for arch in x86 x64; do
-    installer="${bundle}-${version}-win-${arch}.exe"
-    url="https://builds.dotnet.microsoft.com/dotnet/${segment}/${version}/${installer}"
+    url="$(dotnet_installer_url "$channel" "$bundle" "$arch")"
+    installer="${url##*/}"
+
+    if [[ -z "$url" ]]; then
+      echo -e "${RED}No ${label} (${arch}) installer listed in the .Net ${channel} release index.${NC}"
+      rm -rf "$workdir"
+      exit 1
+    fi
 
     if ! curl -sL --fail -o "${workdir}/${installer}" "$url"; then
       echo -e "${RED}Failed to download ${label} (${arch}) from ${url}${NC}"
@@ -412,20 +450,11 @@ check_prefix() {
 
   check_dotnet_runtime dotnetcoredesktop3 Microsoft.WindowsDesktop.App 3.1 ".Net Core Desktop Runtime 3.1"
 
-  # Resolved once, ahead of the installs, so an unreachable index fails before
-  # any of the three bundles is touched rather than part way through.
-  DOTNET8_VERSION="$(dotnet8_target_version)"
+  check_dotnet_bundle 8.0 dotnet-runtime Microsoft.NETCore.App ".Net Runtime 8.0"
 
-  if [[ -z "$DOTNET8_VERSION" ]]; then
-    echo -e "${RED}Unable to determine which .Net 8.0 release to install.${NC}"
-    exit 1
-  fi
+  check_dotnet_bundle 8.0 windowsdesktop-runtime Microsoft.WindowsDesktop.App ".Net Desktop Runtime 8.0"
 
-  check_dotnet8_bundle Runtime dotnet-runtime Microsoft.NETCore.App ".Net Runtime 8.0"
-
-  check_dotnet8_bundle WindowsDesktop windowsdesktop-runtime Microsoft.WindowsDesktop.App ".Net Desktop Runtime 8.0"
-
-  check_dotnet8_bundle aspnetcore/Runtime aspnetcore-runtime Microsoft.AspNetCore.App "ASP.Net Core Runtime 8.0"
+  check_dotnet_bundle 8.0 aspnetcore-runtime Microsoft.AspNetCore.App "ASP.Net Core Runtime 8.0"
 
   check_corefonts
 }
