@@ -329,6 +329,62 @@ check_dotnet_runtime() {
   echo -e "${GREEN}Successfully installed ${label}${NC}"
 }
 
+# Winetricks has no aspnetcore verb, so this runtime is fetched straight from
+# Microsoft's release index. Apps built against 8.0.0 roll forward onto whatever
+# 8.0 patch this resolves to.
+aspnetcore8_target_version() {
+  curl -sL --fail "https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json" 2> /dev/null \
+    | grep -m1 '"latest-runtime"' \
+    | cut -d '"' -f 4 \
+    || true
+}
+
+check_aspnetcore8() {
+  local label="ASP.Net Core Runtime 8.0"
+
+  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/Microsoft.AspNetCore.App/8.0.*" > /dev/null; then
+    echo -e "${GREEN}Found existing ${label} install.${NC}"
+    return
+  fi
+
+  local version workdir arch installer url
+  version="$(aspnetcore8_target_version)"
+
+  if [[ -z "$version" ]]; then
+    echo -e "${RED}Unable to determine which ${label} release to install.${NC}"
+    exit 1
+  fi
+
+  workdir=$(mktemp -d)
+
+  echo -e "${CYAN}Installing ${label} (${version})...${NC}"
+  echo "" > "${LSU_LOGDIR}/aspnetcore8_install.log"
+
+  # x86 first so the x64 build lands last and owns the shared install state on a
+  # 64-bit prefix, which is the order the winetricks dotnet verbs use.
+  for arch in x86 x64; do
+    installer="aspnetcore-runtime-${version}-win-${arch}.exe"
+    url="https://builds.dotnet.microsoft.com/dotnet/aspnetcore/Runtime/${version}/${installer}"
+
+    if ! curl -sL --fail -o "${workdir}/${installer}" "$url"; then
+      echo -e "${RED}Failed to download ${label} (${arch}) from ${url}${NC}"
+      rm -rf "$workdir"
+      exit 1
+    fi
+
+    if ! wine "${workdir}/${installer}" /quiet >> "${LSU_LOGDIR}/aspnetcore8_install.log" 2>&1; then
+      echo -e "${RED}Installation failed for ${label} (${arch}):"
+      tail -n 50 "${LSU_LOGDIR}/aspnetcore8_install.log"
+      echo -e "Full log: ${LSU_LOGDIR}/aspnetcore8_install.log${NC}"
+      rm -rf "$workdir"
+      exit 1
+    fi
+  done
+
+  rm -rf "$workdir"
+  echo -e "${GREEN}Successfully installed ${label} (${version})${NC}"
+}
+
 check_corefonts() {
   if [[ -f "${WINEPREFIX}/drive_c/windows/Fonts/corefonts.installed" ]]; then
     echo -e "${GREEN}Found existing corefonts install.${NC}"
@@ -359,6 +415,8 @@ check_prefix() {
   check_dotnet_runtime dotnetcoredesktop3 Microsoft.WindowsDesktop.App 3.1 ".Net Core Desktop Runtime 3.1"
 
   check_dotnet_runtime dotnetdesktop8 Microsoft.WindowsDesktop.App 8.0 ".Net Desktop Runtime 8.0"
+
+  check_aspnetcore8
 
   check_corefonts
 }
