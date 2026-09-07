@@ -213,6 +213,13 @@ check_tools() {
     exit 1
   fi
 
+  local wine_version=$(wine --version 2> /dev/null)
+  local wine_major=$(echo "$wine_version" | grep -oE '[0-9]+' | head -1)
+  if [[ -z "$wine_major" ]] || (( wine_major < 11 )); then
+    echo -e "${RED}Wine 11 or newer is required (found: ${wine_version:-unknown}), please update it and re-run this script to proceed.${NC}"
+    exit 1
+  fi
+
   if ! run command -v winetricks; then
     echo -e "${RED}Winetricks is not installed, please install it with your package manager and re-run this script to proceed.${NC}"
     exit 1
