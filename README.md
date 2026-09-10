@@ -107,6 +107,12 @@ LSU_WINECARTE_PRERELEASE=1 bash install.sh
 LSU_WINECARTE_VERSION=v0.4.0 bash install.sh
 ```
 
+To have the installer self-update from a branch other than master:
+
+```bash
+LSU_BRANCH=my-feature bash install.sh
+```
+
 ---
 
 ## If you move the folder

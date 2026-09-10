@@ -5,6 +5,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 : "${DEBUG:="0"}"
 : "${UNATTENDED:="0"}"
 : "${TARGET_DIR:="$SCRIPT_DIR"}"
+: "${LSU_BRANCH:="master"}"
 
 set -euo pipefail
 
@@ -121,7 +122,7 @@ check_self_update() {
   local remote_script=$(mktemp)
 
   if ! curl -sL --fail \
-    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/master/install.sh" \
+    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/${LSU_BRANCH}/install.sh" \
     -o "$remote_script"
   then
     echo -e "${YELLOW}Unable to check for installer updates, continuing with the current version.${NC}"
@@ -139,7 +140,7 @@ check_self_update() {
   then
     if [[ "$(git -C "$SCRIPT_DIR" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]; then
       echo -e "${CYAN}Updating installer repository...${NC}"
-      if ! run git -C "$SCRIPT_DIR" pull --ff-only; then
+      if ! run git -C "$SCRIPT_DIR" pull --ff-only origin "$LSU_BRANCH"; then
         echo -e "${YELLOW}Failed to update the installer repository (see ${LSU_LOGDIR}/install.log), continuing with the current version.${NC}"
         rm -f "$remote_script"
         return
@@ -151,7 +152,7 @@ check_self_update() {
     fi
     rm -f "$remote_script"
     echo -e "${GREEN}Installer updated, restarting...${NC}"
-    exec env LSU_SKIP_UPDATE=1 \
+    exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" \
       DEBUG="$DEBUG" UNATTENDED="$UNATTENDED" TARGET_DIR="$TARGET_DIR" \
       bash "$script_path"
   fi
