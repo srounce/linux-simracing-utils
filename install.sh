@@ -210,14 +210,14 @@ cleanup_tools() {
 
 check_tools() {
   if ! run command -v wine; then
-    echo -e "${RED}Wine is not installed, please install it with your package manager and re-run this script to proceed.${NC}"
+    echo -e "${RED}Wine is not available. Re-run this script and accept the Wine install step to proceed.${NC}"
     exit 1
   fi
 
   local wine_version=$(wine --version 2> /dev/null)
   local wine_major=$(echo "$wine_version" | grep -oE '[0-9]+' | head -1)
   if [[ -z "$wine_major" ]] || (( wine_major < 11 )); then
-    echo -e "${RED}Wine 11 or newer is required (found: ${wine_version:-unknown}), please update it and re-run this script to proceed.${NC}"
+    echo -e "${RED}Wine 11 or newer is required (found: ${wine_version:-unknown}). Re-run this script and accept the Wine install step to proceed.${NC}"
     exit 1
   fi
 
@@ -692,6 +692,232 @@ install_winecarte() {
   fi
 }
 
+WINE_REPO="srounce/wine"
+WINE_DIR="${vardir}/wine"
+
+# The tarball carries no version of its own, so the tag it came from is
+# recorded next to the binaries it unpacks.
+wine_installed_version() {
+  local marker="${WINE_DIR}/.wine-version"
+
+  [[ -f "${WINE_DIR}/bin/wine" ]] || return 0
+
+  if [[ -f "$marker" ]]; then
+    cat "$marker"
+  else
+    echo "(unknown version)"
+  fi
+}
+
+# All sangria releases are tagged prerelease, so the newest tag of any kind is
+# the default. LSU_WINE_VERSION pins an exact tag.
+wine_target_version() {
+  if [[ -n "${LSU_WINE_VERSION:-}" ]]; then
+    echo "${LSU_WINE_VERSION}"
+  else
+    github_newest_tag "$WINE_REPO"
+  fi
+}
+
+check_wine() {
+  echo -e "${CYAN}Checking for existing Wine installation...${NC}"
+
+  local installed target
+  installed="$(wine_installed_version)"
+  target="$(wine_target_version)"
+
+  if [[ "$UNATTENDED" == "1" ]]; then
+    install_wine "$installed" "$target"
+    return
+  fi
+
+  if confirm_component "Wine (sangria)" "$installed" "$target"; then
+    install_wine "$installed" "$target"
+  else
+    echo -e "${YELLOW}Skipping Wine installation${NC}"
+  fi
+}
+
+# The release is a generic FHS build, so on NixOS it cannot run as-is: the
+# ELF interpreter /lib64/ld-linux-x86-64.so.2 does not exist, and the
+# unix-side modules cannot resolve system libraries (libX11, pulse, freetype,
+# ...), which kills prefix boot with a kernel32 c0000135. The executables get
+# their interpreter patched to the pinned glibc's loader, and the wrappers
+# bake the needed lib dirs into LD_LIBRARY_PATH. Containers (steam-run) are
+# not an option: they give every invocation a private /tmp, so each wine call
+# spawns its own wineserver and they race each other over the shared prefix.
+WINE_NIXPKGS_REV="dc5d91f840324650bac8c379428c7037a416959a"
+
+# One entry per soname the release binaries reference (DT_NEEDED plus dlopen
+# strings), resolved against the pinned revision above. Resolving from
+# whatever wine the running system happens to have installed would track a lib
+# set the release was never built against.
+WINE_NIX_LIBS=(
+  alsa-lib "cups^lib" "dbus^lib" "fontconfig^lib" freetype "glib^out"
+  "gnutls^out" "gst_all_1.gstreamer^out" gst_all_1.gst-plugins-base
+  "krb5^lib" libglvnd libgphoto2 "libpcap^lib" libpulseaudio libusb1 libv4l
+  libxkbcommon ocl-icd "pcsclite^lib" SDL2 systemdLibs unixODBC vulkan-loader
+  wayland xorg.libX11 xorg.libXcomposite xorg.libXcursor xorg.libXext
+  xorg.libXfixes xorg.libXi xorg.libXinerama xorg.libXrandr xorg.libXrender
+  xorg.libXxf86vm
+)
+
+# Resolves the pinned lib set plus glibc and patchelf, patches the release
+# executables' interpreter to the pinned glibc's loader, and leaves the lib
+# search path in WINE_NIX_LIB_PATH for the wrappers.
+WINE_NIX_LIB_PATH=""
+
+setup_wine_nix_runtime() {
+  local flakeref="github:NixOS/nixpkgs/${WINE_NIXPKGS_REV}"
+  local rootdir="${vardir}/.wine-libs"
+  local installables=() a link root p f libpath="" loader="" patchelf=""
+
+  command -v nix > /dev/null || return 1
+
+  for a in "${WINE_NIX_LIBS[@]}" "glibc^out" patchelf; do
+    installables+=("${flakeref}#${a}")
+  done
+
+  rm -rf "$rootdir"
+  mkdir -p "${rootdir}/compat"
+
+  # The out-links double as GC roots, so the store paths survive collection.
+  nix --extra-experimental-features 'nix-command flakes' build \
+    --out-link "${rootdir}/dep" "${installables[@]}" \
+    >> "${LSU_LOGDIR}/install.log" 2>&1 || return 1
+
+  for link in "${rootdir}"/dep*; do
+    root="$(readlink -f "$link")"
+
+    # glibc stays out of LD_LIBRARY_PATH: the patched loader finds its own
+    # libc, and host programs spawned by wine keep the host's.
+    if [[ -e "${root}/lib/ld-linux-x86-64.so.2" ]]; then
+      loader="${root}/lib/ld-linux-x86-64.so.2"
+      continue
+    fi
+
+    if [[ -x "${root}/bin/patchelf" ]]; then
+      patchelf="${root}/bin/patchelf"
+      continue
+    fi
+
+    p="${root}/lib"
+    [[ -d "$p" ]] || continue
+    libpath="${libpath:+$libpath:}$p"
+
+    # The release links against Debian's libpcap soname, which nixpkgs does
+    # not provide.
+    if [[ -e "$p/libpcap.so.1" ]]; then
+      ln -sf "$p/libpcap.so.1" "${rootdir}/compat/libpcap.so.0.8"
+    fi
+  done
+
+  [[ -n "$libpath" && -n "$loader" && -n "$patchelf" ]] || return 1
+
+  for f in "${WINE_DIR}/bin/"*; do
+    [[ -f "$f" && "$(head -c 4 "$f")" == $'\x7fELF' ]] || continue
+    run "$patchelf" --set-interpreter "$loader" "$f" || return 1
+  done
+
+  WINE_NIX_LIB_PATH="${rootdir}/compat:${libpath}"
+}
+
+install_wine_bin_entries() {
+  local lib_path="" tool
+
+  if [[ -e /etc/NIXOS ]]; then
+    if ! setup_wine_nix_runtime; then
+      echo -e "${RED}Failed to set up Wine's nix runtime (see ${LSU_LOGDIR}/install.log). Check that nix is available and you are online, then re-run this script.${NC}"
+      exit 1
+    fi
+    lib_path="$WINE_NIX_LIB_PATH"
+  fi
+
+  for tool in wine wineserver wineboot winecfg msiexec regedit regsvr32 winepath winedbg; do
+    # An earlier install may have left a symlink here; writing through it would
+    # clobber the real binary.
+    rm -f "${bindir}/${tool}"
+
+    if [[ -z "$lib_path" ]]; then
+      ln -s "${WINE_DIR}/bin/${tool}" "${bindir}/${tool}"
+      continue
+    fi
+
+    cat > "${bindir}/${tool}" << EOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="\${LD_LIBRARY_PATH:+\$LD_LIBRARY_PATH:}${lib_path}"
+exec "${WINE_DIR}/bin/${tool}" "\$@"
+EOF
+    chmod +x "${bindir}/${tool}"
+  done
+}
+
+install_wine() {
+  local installed="$1"
+  local target="$2"
+  local workdir=$(mktemp -d)
+  local base_url tarball tool
+
+  if [[ "$installed" == "$target" ]] && [[ -n "$installed" ]]; then
+    echo -e "${GREEN}Wine ${installed} is already installed.${NC}"
+    install_wine_bin_entries
+    rm -rf ${workdir}
+    return
+  fi
+
+  if [[ -n "$installed" ]]; then
+    echo -e "${CYAN}Updating Wine...${NC}"
+  else
+    echo -e "${CYAN}Installing Wine...${NC}"
+  fi
+
+  # Without wine nothing downstream can run, so an unresolved release is only
+  # survivable when a previous install is already in place.
+  if [[ -z "$target" ]]; then
+    if [[ -n "$installed" ]]; then
+      echo -e "${YELLOW}Unable to determine which Wine release to install, keeping ${installed}.${NC}"
+      rm -rf ${workdir}
+      return
+    fi
+    echo -e "${RED}Unable to determine which Wine release to install.${NC}"
+    rm -rf ${workdir}
+    exit 1
+  fi
+
+  tarball="wine-${target}-amd64.tar.xz"
+  base_url="https://github.com/${WINE_REPO}/releases/download/${target}"
+
+  if ! curl -sL --fail "${base_url}/${tarball}" -o "${workdir}/${tarball}" \
+    || ! curl -sL --fail "${base_url}/SHA256SUMS" -o "${workdir}/SHA256SUMS"
+  then
+    echo -e "${RED}Failed to download Wine ${target} from ${base_url}${NC}"
+    rm -rf ${workdir}
+    exit 1
+  fi
+
+  if ! (cd "$workdir" && grep " ${tarball}\$" SHA256SUMS | run sha256sum -c); then
+    echo -e "${RED}Checksum verification failed for Wine ${target}.${NC}"
+    rm -rf ${workdir}
+    exit 1
+  fi
+
+  rm -rf "${WINE_DIR}"
+  mkdir -p "${WINE_DIR}"
+  tar -xJf "${workdir}/${tarball}" -C "${WINE_DIR}" --strip-components=1
+
+  rm -rf ${workdir}
+
+  install_wine_bin_entries
+
+  echo "$target" > "${WINE_DIR}/.wine-version"
+
+  if [[ -n "$installed" ]]; then
+    echo -e "${GREEN}Wine ${target} successfully updated.${NC}"
+  else
+    echo -e "${GREEN}Wine ${target} successfully installed.${NC}"
+  fi
+}
+
 postinstall_winecarte() {
   echo -e "
 ${CYAN}Winecarte setup${NC}
@@ -720,6 +946,7 @@ install_launch_wrapper() {
 
 export WINEDEBUG=-all
 export WINEPREFIX="${WINEPREFIX}"
+export PATH="${bindir}:\$PATH"
 
 WINEHUB_PIDFILE="${WINEPREFIX}/winehub.pid"
 
@@ -749,6 +976,7 @@ EOF
 #!/usr/bin/env bash
 
 export WINEPREFIX="${WINEPREFIX}"
+export PATH="${bindir}:\$PATH"
 
 WINEHUB_PIDFILE="${WINEPREFIX}/winehub.pid"
 
@@ -843,6 +1071,8 @@ patch_desktop_launchers_in() {
     fi
   done
 }
+
+check_wine
 
 check_tools
 

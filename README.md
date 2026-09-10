@@ -22,9 +22,10 @@ This installer sets up everything needed to bridge that gap using **[Winecarte](
 
 Before running the installer, make sure the following are installed on your system. If you're not sure how to install them, search for instructions for your specific Linux distribution (e.g. Ubuntu, Fedora, Arch).
 
-- **Wine** — runs Windows applications on Linux
 - **curl** — for downloading files (usually pre-installed)
 - **unzip** — for extracting downloaded archives (usually pre-installed)
+
+The installer ships its own Wine build, so you don't need Wine installed. On NixOS its runtime libraries and dynamic loader are fetched from a pinned nixpkgs revision and wired up automatically; no extra system configuration is needed.
 
 ---
 
@@ -52,9 +53,9 @@ Before running the installer, make sure the following are installed on your syst
    bash install.sh
    ```
 
-4. Follow the prompts. The installer will ask whether you want to install or skip each component — SimHub, CrewChief, and Winecarte. You can safely press Enter to accept the defaults.
+4. Follow the prompts. The installer will ask whether you want to install or skip each component — Wine, SimHub, CrewChief, and Winecarte. You can safely press Enter to accept the defaults.
 
-The installer will download and set everything up, including a dedicated Wine environment so SimHub and CrewChief don't interfere with any other Wine applications you might have.
+The installer will download and set everything up, including its own Wine build and a dedicated Wine environment so SimHub and CrewChief don't interfere with any other Wine applications you might have.
 
 ---
 
@@ -111,6 +112,12 @@ To have the installer self-update from a branch other than master:
 
 ```bash
 LSU_BRANCH=my-feature bash install.sh
+```
+
+To pin a specific Wine release:
+
+```bash
+LSU_WINE_VERSION=sangria-11.17-pre1 bash install.sh
 ```
 
 ---
