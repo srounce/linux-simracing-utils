@@ -33,6 +33,16 @@ The installer ships its own Wine build, so you don't need Wine installed. On Nix
 
 > **Important:** Choose where you want to keep this folder before running the installer. The install location gets baked into the desktop launchers for SimHub and CrewChief. If you move the folder later, just re-run `install.sh` from the new location to fix everything up.
 
+Quickest way, run this in a terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srounce/linux-simracing-utils/master/install.sh | bash
+```
+
+It asks where to install (default `~/linux-simracing-utils`) and puts a copy of `install.sh` there for re-runs and updates. Then skip to step 4.
+
+To install from a clone instead:
+
 1. Open a terminal and download the installer:
 
    ```bash
@@ -113,6 +123,8 @@ To have the installer self-update from a branch other than master:
 ```bash
 LSU_BRANCH=my-feature bash install.sh
 ```
+
+The installed copy of `install.sh` keeps that branch as its default, so later runs follow it without setting `LSU_BRANCH` again.
 
 To pin a specific Wine release:
 

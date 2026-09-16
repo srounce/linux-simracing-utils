@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
 
+# Run from a pipe (curl ... | bash) there is no script file to work from and
+# stdin is the script itself, so fetch a copy, point stdin back at the
+# terminal and continue from that file. The copy step below then lands it in
+# the install directory.
+if [[ ! -f "${BASH_SOURCE[0]:-}" ]]; then
+  : "${LSU_BRANCH:="master"}"
+  bootstrap_dir=$(mktemp -d)
+  if ! curl -sL --fail \
+    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/${LSU_BRANCH}/install.sh" \
+    -o "${bootstrap_dir}/install.sh"
+  then
+    echo "Unable to download the installer from branch ${LSU_BRANCH}." >&2
+    exit 1
+  fi
+  { exec < /dev/tty; } 2> /dev/null || true
+  exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" \
+    TARGET_DIR="${TARGET_DIR:-$HOME/linux-simracing-utils}" \
+    bash "${bootstrap_dir}/install.sh"
+fi
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
 : "${DEBUG:="0"}"
