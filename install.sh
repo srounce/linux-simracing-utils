@@ -133,6 +133,19 @@ confirm_component() {
   fi
 }
 
+# A standalone installer keeps following the branch it was installed from,
+# so the branch is written into its LSU_BRANCH default. Git clones are left
+# alone: the checkout is the branch record and a modified file blocks pull.
+bake_branch() {
+  local branch=${LSU_BRANCH//&/\\&}
+  branch=${branch//|/\\|}
+  sed -i "s|^: \"\${LSU_BRANCH:=\"[^\"]*\"}\"\$|: \"\${LSU_BRANCH:=\"${branch}\"}\"|" "$1"
+}
+
+is_lsu_clone() {
+  [[ "$(git -C "$1" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]
+}
+
 check_self_update() {
   if [[ "${LSU_SKIP_UPDATE:-0}" == "1" ]]; then
     return
@@ -150,6 +163,10 @@ check_self_update() {
     return
   fi
 
+  if ! is_lsu_clone "$SCRIPT_DIR"; then
+    bake_branch "$remote_script"
+  fi
+
   if cmp -s "$script_path" "$remote_script"; then
     rm -f "$remote_script"
     return
@@ -158,7 +175,7 @@ check_self_update() {
   if [[ "$UNATTENDED" == "1" ]] \
     || confirm "A new version of the installer is available, do you want to update?" Y
   then
-    if [[ "$(git -C "$SCRIPT_DIR" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]; then
+    if is_lsu_clone "$SCRIPT_DIR"; then
       echo -e "${CYAN}Updating installer repository...${NC}"
       if ! run git -C "$SCRIPT_DIR" pull --ff-only origin "$LSU_BRANCH"; then
         echo -e "${YELLOW}Failed to update the installer repository (see ${LSU_LOGDIR}/install.log), continuing with the current version.${NC}"
@@ -195,6 +212,7 @@ export WINEPREFIX
 
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
+  bake_branch "${TARGET_DIR}/install.sh"
   chmod +x "${TARGET_DIR}/install.sh"
   echo -e "${GREEN}Installer copied to ${TARGET_DIR}/install.sh${NC}"
 fi
