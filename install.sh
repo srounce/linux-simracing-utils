@@ -327,9 +327,6 @@ set_registry_entries() {
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f
 
-  wine reg delete "HKLM\System\CurrentControlSet\Services\winebus" /v "EnableHidraw"  /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1 || true
-  wine reg delete "HKLM\System\CurrentControlSet\Services\winebus" /v "DisableHidraw" /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1 || true
-
   echo -e "${CYAN}Registry entries updated successfully${NC}"
 }
 
