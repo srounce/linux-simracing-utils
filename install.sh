@@ -1028,6 +1028,188 @@ EOF
   chmod +x "${bindir}/lsu-winehub-manager"
 }
 
+install_hidraw_device() {
+  cat > "${bindir}/hidraw-device" << 'EOF'
+#!/usr/bin/env bash
+# Manages winebus's EnableHidraw list in the LSU prefix. See --help.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+WINE="$SCRIPT_DIR/wine"
+WINESERVER="$SCRIPT_DIR/wineserver"
+export WINEPREFIX="$(dirname "$SCRIPT_DIR")/pfx"
+export WINEDEBUG=-all
+
+KEY='HKLM\System\CurrentControlSet\Services\winebus'
+
+die() { echo "error: $*" >&2; exit 1; }
+usage() { echo "usage: ${0##*/} add|remove <VID> <PID>  (--help for details)" >&2; exit 2; }
+
+help() {
+    cat << HELP
+usage: ${0##*/} add|remove <VID> <PID>
+
+Adds or removes a USB device from winebus's EnableHidraw list so Wine
+exposes it through hidraw instead of SDL. IDs are 4 hex digits, with or
+without a 0x prefix (see lsusb).
+
+Applies to the prefix at $WINEPREFIX
+using the wine at $WINE
+
+The change takes effect the next time the wineserver starts. If one is
+already running you are asked whether to restart it, which closes every
+program in the prefix.
+
+Environment:
+  NO_RESTART=1   never restart a running wineserver, and do not ask
+
+Example:
+  ${0##*/} add 0x1209 0xffb0
+HELP
+}
+
+# 0x1234 / 1234 / 0X12AB -> 12ab, must be exactly 4 hex digits
+normalise() {
+    local v="${1,,}"
+    v="${v#0x}"
+    [[ "$v" =~ ^[0-9a-f]{4}$ ]] || die "'$1' is not a 4-digit hex ID"
+    printf '%s' "$v"
+}
+
+case "${1:-}" in -h|--help|help) help; exit 0 ;; esac
+[[ $# -eq 3 ]] || usage
+ACTION="$1"
+[[ "$ACTION" == add || "$ACTION" == remove ]] || usage
+# Separate assignments so a bad ID stops the script (set -e only sees the last $(...))
+VID="$(normalise "$2")"
+PID="$(normalise "$3")"
+ENTRY="$VID:$PID"
+
+[[ -x "$WINE" ]] || die "no wine at $WINE"
+[[ -f "$WINEPREFIX/system.reg" ]] || die "no Wine prefix at $WINEPREFIX"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# wineserver chdirs into /tmp/.wine-UID/server-<dev>-<inode> of its prefix
+prefix_server_running() {
+    local dir pid
+    dir="$(printf '/tmp/.wine-%u/server-%x-%x' "$(id -u)" $(stat -c '%d %i' "$WINEPREFIX"))"
+    for pid in $(pgrep -x wineserver); do
+        [[ "$(readlink "/proc/$pid/cwd" 2>/dev/null)" == "$dir" ]] && return 0
+    done
+    return 1
+}
+
+# Checked before this script starts wine itself, which leaves a server of its
+# own behind for a few seconds.
+server_was_running=0
+prefix_server_running && server_was_running=1
+
+# Wine's background processes keep pipes open after 'wine' exits, which makes
+# $(wine ...) hang. Writing to a file avoids that; 'timeout' is a backstop.
+wine_to_file() {
+    local out="$1"; shift
+    timeout 120 "$WINE" "$@" >"$out" 2>&1 </dev/null
+}
+
+# Prints the current EnableHidraw entries, one per line.
+# Returns 1 if the value does not exist.
+read_list() {
+    local out="$TMP/query.txt" line
+    wine_to_file "$out" reg query "$KEY" /v EnableHidraw || return 1
+    line="$(grep -a 'REG_MULTI_SZ' "$out" | head -n1 | tr -d '\r')" || return 1
+    line="${line#*REG_MULTI_SZ}"
+    # reg.exe separates the strings with a literal backslash-zero
+    printf '%s\n' "$line" | sed -e 's/\\0/\n/g' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+}
+
+has_entry() { grep -qixF -- "$ENTRY"; }
+
+entries=()
+if list="$(read_list)"; then
+    mapfile -t entries <<<"$list"
+elif grep -qa '"EnableHidraw"' "$WINEPREFIX/system.reg"; then
+    # The value is on disk but the query failed: stop rather than overwrite it.
+    die "EnableHidraw exists in system.reg but 'wine reg query' failed; not touching it"
+fi
+
+present=0
+((${#entries[@]})) && printf '%s\n' "${entries[@]}" | has_entry && present=1
+
+if [[ "$ACTION" == add && $present == 1 ]]; then
+    echo "$ENTRY already in EnableHidraw, nothing to do"
+    exit 0
+elif [[ "$ACTION" == remove && $present == 0 ]]; then
+    echo "$ENTRY not in EnableHidraw, nothing to do"
+    exit 0
+fi
+
+if [[ "$ACTION" == add ]]; then
+    entries+=("$ENTRY")
+else
+    kept=()
+    for e in "${entries[@]}"; do
+        [[ "${e,,}" == "$ENTRY" ]] || kept+=("$e")
+    done
+    entries=("${kept[@]}")
+fi
+
+# One backup, never overwritten by later runs
+[[ -e "$WINEPREFIX/system.reg.bak-hidraw" ]] || cp -p "$WINEPREFIX/system.reg" "$WINEPREFIX/system.reg.bak-hidraw"
+
+if ((${#entries[@]})); then
+    # reg.exe takes REG_MULTI_SZ strings joined by a literal backslash-zero
+    data="$(printf '%s\\0' "${entries[@]}")"
+    data="${data%\\0}"
+    wine_to_file "$TMP/write.txt" reg add "$KEY" /v EnableHidraw /t REG_MULTI_SZ /d "$data" /f \
+        || die "reg add failed: $(tail -n5 "$TMP/write.txt")"
+    # Do not trust the exit code alone: read the value back
+    list="$(read_list)" || die "reg add ran but EnableHidraw is unreadable"
+    if [[ "$ACTION" == add ]]; then
+        printf '%s\n' "$list" | has_entry || die "reg add ran but $ENTRY is not in EnableHidraw"
+    else
+        printf '%s\n' "$list" | has_entry && die "reg add ran but $ENTRY is still in EnableHidraw"
+    fi
+else
+    # An empty list is the same as no value; delete it so winebus falls back to its default
+    wine_to_file "$TMP/write.txt" reg delete "$KEY" /v EnableHidraw /f \
+        || die "reg delete failed: $(tail -n5 "$TMP/write.txt")"
+    read_list >/dev/null && die "reg delete ran but EnableHidraw still exists"
+fi
+
+if [[ "$ACTION" == add ]]; then
+    echo "added $ENTRY (list now has ${#entries[@]} entries)"
+else
+    echo "removed $ENTRY (list now has ${#entries[@]} entries)"
+fi
+
+# winebus only reads the list when the server starts. A server this script
+# started itself can be killed freely; one that was already there has the
+# user's programs in it.
+restart=1
+if ((server_was_running)); then
+    restart=0
+    if [[ "${NO_RESTART:-0}" != 1 ]]; then
+        echo "The wineserver for $WINEPREFIX is running. Restarting it now will" >&2
+        echo "terminate every program running in it." >&2
+        read -rp "Restart wineserver? [y/N] " answer
+        [[ "${answer,,}" == y || "${answer,,}" == yes ]] && restart=1
+    fi
+fi
+
+if ((restart)); then
+    "$WINESERVER" -k || true
+    echo "wineserver stopped, the change applies on next start"
+else
+    echo "the change will not take effect until wineserver is restarted:"
+    echo "  WINEPREFIX=\"$WINEPREFIX\" \"$WINESERVER\" -k"
+fi
+EOF
+  chmod +x "${bindir}/hidraw-device"
+}
+
 fix_desktop_launchers() {
   echo -e "${CYAN}Patching desktop launchers...${NC}"
 
@@ -1122,5 +1304,7 @@ check_winecarte
 postinstall_winecarte
 
 install_launch_wrapper
+
+install_hidraw_device
 
 fix_desktop_launchers
