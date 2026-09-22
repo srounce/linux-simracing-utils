@@ -53,8 +53,9 @@ run() {
 
 if [[ $DEBUG == "1" ]]; then
   set -x
+  export WINEDEBUG=${WINEDEBUG:-+seh,+loaddll,+module}
 else
-  export WINEDEBUG="-all"
+  export WINEDEBUG=${WINEDEBUG:--all}
 fi
 
 # $2 is the answer a bare Enter gives, and picks which letter the hint
@@ -226,10 +227,10 @@ export PATH="${bindir}:$PATH"
 
 setup_silentwine() {
   export SILENT_WINE=$(mktemp)
-  cat > $SILENT_WINE << 'EOF'
+  cat > $SILENT_WINE << EOF
 #!/usr/bin/env bash
-export WINEDEBUG=-all
-exec wine "$@"
+export WINEDEBUG=${WINEDEBUG:--all}
+exec wine "\$@"
 EOF
   chmod +x $SILENT_WINE
 }
