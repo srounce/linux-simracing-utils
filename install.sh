@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
+: "${LSU_BRANCH:="master"}"
+
 # Run from a pipe (curl ... | bash) there is no script file to work from and
 # stdin is the script itself, so fetch a copy, point stdin back at the
 # terminal and continue from that file. The copy step below then lands it in
 # the install directory.
 if [[ ! -f "${BASH_SOURCE[0]:-}" ]]; then
-  : "${LSU_BRANCH:="master"}"
   bootstrap_dir=$(mktemp -d)
   if ! curl -sL --fail \
     "https://raw.githubusercontent.com/srounce/linux-simracing-utils/${LSU_BRANCH}/install.sh" \
@@ -25,7 +26,6 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 : "${DEBUG:="0"}"
 : "${UNATTENDED:="0"}"
 : "${TARGET_DIR:="$SCRIPT_DIR"}"
-: "${LSU_BRANCH:="master"}"
 
 set -euo pipefail
 
@@ -211,6 +211,7 @@ WINEPREFIX="${TARGET_DIR}/pfx"
 export WINEPREFIX
 
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
+  mkdir -p "${TARGET_DIR}"
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
   bake_branch "${TARGET_DIR}/install.sh"
   chmod +x "${TARGET_DIR}/install.sh"
