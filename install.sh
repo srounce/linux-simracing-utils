@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 : "${LSU_BRANCH:="master"}"
+: "${LSU_WINE_REPO:="srounce/wine"}"
+: "${LSU_WINE_VERSION:="latest"}"
 
 # Run from a pipe (curl ... | bash) there is no script file to work from and
 # stdin is the script itself, so fetch a copy, point stdin back at the
@@ -134,13 +136,19 @@ confirm_component() {
   fi
 }
 
-# A standalone installer keeps following the branch it was installed from,
-# so the branch is written into its LSU_BRANCH default. Git clones are left
-# alone: the checkout is the branch record and a modified file blocks pull.
-bake_branch() {
-  local branch=${LSU_BRANCH//&/\\&}
-  branch=${branch//|/\\|}
-  sed -i "s|^: \"\${LSU_BRANCH:=\"[^\"]*\"}\"\$|: \"\${LSU_BRANCH:=\"${branch}\"}\"|" "$1"
+bake_default() {
+  local name="$1" value="$2" file="$3"
+  value=${value//&/\\&}
+  value=${value//|/\\|}
+  sed -i "s|^: \"\${${name}:=\"[^\"]*\"}\"\$|: \"\${${name}:=\"${value}\"}\"|" "$file"
+}
+
+# Standalone installers keep their branch and Wine pin as baked defaults. Git
+# clones are skipped, since a modified file blocks pull.
+bake_defaults() {
+  bake_default LSU_BRANCH "$LSU_BRANCH" "$1"
+  bake_default LSU_WINE_REPO "$LSU_WINE_REPO" "$1"
+  bake_default LSU_WINE_VERSION "$LSU_WINE_VERSION" "$1"
 }
 
 is_lsu_clone() {
@@ -165,7 +173,7 @@ check_self_update() {
   fi
 
   if ! is_lsu_clone "$SCRIPT_DIR"; then
-    bake_branch "$remote_script"
+    bake_defaults "$remote_script"
   fi
 
   if cmp -s "$script_path" "$remote_script"; then
@@ -199,6 +207,23 @@ check_self_update() {
   rm -f "$remote_script"
 }
 
+# Stops a pin naming no release from being baked in. Offline runs still pass.
+check_wine_pin() {
+  [[ "$LSU_WINE_VERSION" == "latest" ]] && return
+
+  local tag="$LSU_WINE_VERSION"
+  local status
+  status=$(curl -sI -o /dev/null -w '%{http_code}' \
+    "https://github.com/${LSU_WINE_REPO}/releases/download/${tag}/wine-${tag}-amd64.tar.xz" \
+    || true)
+
+  if [[ "$status" == "404" ]]; then
+    echo -e "${RED}Wine release ${tag} was not found in ${LSU_WINE_REPO}. Check LSU_WINE_VERSION, or set it to \"latest\" to follow the newest release.${NC}"
+    exit 1
+  fi
+}
+
+check_wine_pin
 check_self_update
 
 if [[ "$UNATTENDED" == "1" ]]; then
@@ -214,7 +239,7 @@ export WINEPREFIX
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
   mkdir -p "${TARGET_DIR}"
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
-  bake_branch "${TARGET_DIR}/install.sh"
+  bake_defaults "${TARGET_DIR}/install.sh"
   chmod +x "${TARGET_DIR}/install.sh"
   echo -e "${GREEN}Installer copied to ${TARGET_DIR}/install.sh${NC}"
 fi
@@ -729,7 +754,6 @@ install_winecarte() {
   fi
 }
 
-WINE_REPO="srounce/wine"
 WINE_DIR="${vardir}/wine"
 
 # The tarball carries no version of its own, so the tag it came from is
@@ -749,10 +773,10 @@ wine_installed_version() {
 # All sangria releases are tagged prerelease, so the newest tag of any kind is
 # the default. LSU_WINE_VERSION pins an exact tag.
 wine_target_version() {
-  if [[ -n "${LSU_WINE_VERSION:-}" ]]; then
+  if [[ "$LSU_WINE_VERSION" != "latest" ]]; then
     echo "${LSU_WINE_VERSION}"
   else
-    github_newest_tag "$WINE_REPO"
+    github_newest_tag "$LSU_WINE_REPO"
   fi
 }
 
@@ -922,7 +946,7 @@ install_wine() {
   fi
 
   tarball="wine-${target}-amd64.tar.xz"
-  base_url="https://github.com/${WINE_REPO}/releases/download/${target}"
+  base_url="https://github.com/${LSU_WINE_REPO}/releases/download/${target}"
 
   if ! curl -sL --fail "${base_url}/${tarball}" -o "${workdir}/${tarball}" \
     || ! curl -sL --fail "${base_url}/SHA256SUMS" -o "${workdir}/SHA256SUMS"

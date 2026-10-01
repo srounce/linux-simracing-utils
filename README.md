@@ -132,6 +132,10 @@ To pin a specific Wine release:
 LSU_WINE_VERSION=sangria-11.17-pre1 bash install.sh
 ```
 
+The pin is kept in the installed copy of `install.sh` the same way. `LSU_WINE_VERSION=latest` removes it and returns to the newest release.
+
+`LSU_WINE_REPO=owner/repo` takes Wine releases from another GitHub repository, and is kept the same way. The default is `srounce/wine`.
+
 ---
 
 ## If you move the folder
