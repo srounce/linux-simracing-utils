@@ -982,21 +982,19 @@ install_wine() {
 
 postinstall_winecarte() {
   echo -e "
-${CYAN}Winecarte setup${NC}
 
-To receive telemetry in SimHub and CrewChief, each game needs to be launched
-via winecarte-run. This is done through Steam launch options.
+---------------------------------------------
 
-For each supported game:
+${YELLOW}Winecarte injection is now automatic!${NC}
 
-  1. Right-click the game in your Steam library and select ${CYAN}Properties${NC}
-  2. Go to the ${CYAN}General${NC} tab and find the ${CYAN}Launch Options${NC} field
-  3. Enter the following:
+The winecarte-run tool is now optional, you can remove it from your launch options.
 
-     ${GREEN}${TARGET_DIR}/bin/winecarte-run %command%${NC}
+---------------------------------------------
 
-  The %command% part is required -- it tells Steam to launch the game itself
-  after winecarte-run has set up the shared memory bridge.
+${YELLOW}Not receiving telemetry after an update?${NC}
+
+Re-run this script in future to repair all desktop launcher entries in the prefix.
+
 "
 }
 

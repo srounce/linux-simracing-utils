@@ -14,7 +14,7 @@ This installer sets up everything needed to bridge that gap using **[Winecarte](
 
 - **Wine2Linux** runs in a Wine prefix and maps shared memory in either direction between the prefix and the Linux system. Multiple instances can be run in different prefixes to replicate shared memory across prefixes.
 - **Winehub**, which runs against a 'target' (non-game, eg. SimHub/CrewChief/etc.) prefix and works by detecting games running in their own separate prefixes. Upon detection it starts an instance of Wine2Linux in the target prefix to map shared memory files from Linux into the Wine environment.
-- **winecarte-run**, wraps the execution of a Proton game and starts a Wine2Linux instance in the game's prefix to export data from the game to the Linux environment.
+- **winecarte-run**, wraps the execution of a Proton game and starts a Wine2Linux instance in the game's prefix to export data from the game to the Linux environment. Optional now that injection is automatic.
 
 ---
 
@@ -71,25 +71,9 @@ The installer will download and set everything up, including its own Wine build 
 
 ## Setting up your games
 
-For SimHub and CrewChief to receive telemetry, each game needs to be launched via `winecarte-run`. This tells Winecarte to expose the game's shared memory to Wine so the apps can read it.
+Winecarte injection is automatic, so games need no setup. Launch them from Steam as normal.
 
-For each game in Steam:
-
-1. Right-click the game in your Steam library and select **Properties**
-2. In the **General** tab, find the **Launch Options** field
-3. Enter the following, replacing the path with the actual location of your `linux-simracing-utils` folder:
-
-   ```
-   /path/to/linux-simracing-utils/bin/winecarte-run %command%
-   ```
-
-   For example, if you cloned the repo to your home folder:
-
-   ```
-   ~/linux-simracing-utils/bin/winecarte-run %command%
-   ```
-
-The `%command%` part is important — it tells Steam to run the game itself after `winecarte-run`.
+If you previously added `winecarte-run %command%` to a game's Steam launch options, you can remove it. `winecarte-run` is now optional.
 
 ---
 
@@ -162,6 +146,8 @@ log/             # install and runtime logs (created by the installer)
 ---
 
 ## Troubleshooting
+
+Not receiving telemetry after an update? Re-run `install.sh` to repair the desktop launcher entries in the prefix.
 
 Install logs are saved to the `log/` folder inside the project directory. If something goes wrong during installation, check the relevant log file there for details.
 
