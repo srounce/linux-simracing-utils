@@ -264,8 +264,9 @@ setup_silentwine
 
 DOTNET_INDEX_DIR=$(mktemp -d)
 
-trap cleanup_tools SIGINT
-trap cleanup_tools SIGTERM
+# A trapped signal has to exit itself, which then runs the EXIT trap.
+trap 'exit 130' SIGINT
+trap 'exit 143' SIGTERM
 trap cleanup_tools EXIT
 
 cleanup_tools() {
