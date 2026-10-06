@@ -1041,7 +1041,7 @@ export PATH="${bindir}:\$PATH"
 WINEHUB_PIDFILE="${WINEPREFIX}/winehub.pid"
 
 export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
-"${TARGET_DIR}/bin/winehub" &
+"${TARGET_DIR}/bin/winehub" > "${LSU_LOGDIR}/winehub.log" 2>&1 &
 echo \$! > "\$WINEHUB_PIDFILE"
 
 sleep 2
