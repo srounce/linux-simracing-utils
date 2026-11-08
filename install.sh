@@ -236,6 +236,14 @@ fi
 WINEPREFIX="${TARGET_DIR}/pfx"
 export WINEPREFIX
 
+# Logging starts before the install directory is known, so move what has been
+# written so far to the chosen directory and log there from now on.
+mkdir -p "${TARGET_DIR}/log"
+if [[ ! "${TARGET_DIR}/log" -ef "$LSU_LOGDIR" ]]; then
+  mv -f "${LSU_LOGDIR}/install.log" "${LSU_LOGDIR}/prefix_setup.log" "${TARGET_DIR}/log/"
+  LSU_LOGDIR="${TARGET_DIR}/log"
+fi
+
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
   mkdir -p "${TARGET_DIR}"
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
@@ -339,6 +347,8 @@ setup_prefix() {
   mkdir -p $WINEPREFIX
 
   WINEDLLOVERRIDES="mscoree,mshtml=" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  # wineboot returns before the wineserver has written the registry to disk.
+  wineserver -w
 
   echo -e "${GREEN}Prefix successfully created at $WINEPREFIX${NC}"
 }
@@ -354,6 +364,9 @@ set_registry_entries() {
 
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f
+
+  # Flush the registry to disk before winetricks reads the prefix.
+  wineserver -w
 
   echo -e "${CYAN}Registry entries updated successfully${NC}"
 }
