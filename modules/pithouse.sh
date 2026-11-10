@@ -1,76 +1,23 @@
 #!/usr/bin/env bash
+#
+# MOZA Pit House (https://mozaracing.com/downloads) module for
+# linux-simracing-utils. See modules/example.sh for how modules work.
 
-# Installs MOZA Pit House into the prefix that install.sh sets up. Run
-# install.sh first: this script uses its Wine, prefix and launch wrapper.
+for LSU_LIB in "${LSU_LIB:-}" "$(dirname -- "${BASH_SOURCE[0]}")"/{..,../..}/lib/lsu-common.sh; do
+  [[ -f "$LSU_LIB" ]] && break
+done
+# shellcheck source=../lib/lsu-common.sh
+source "$LSU_LIB" || { echo "lib/lsu-common.sh not found, run install.sh first." >&2; exit 1; }
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+LSU_MODULE_ID="pithouse"
+LSU_MODULE_NAME="MOZA Pit House"
+LSU_MODULE_DESCRIPTION="Settings and firmware for MOZA wheelbases, wheels and pedals"
+LSU_MODULE_DEPENDS=""
+LSU_MODULE_MIN_WINE="sangria-11.18-pre3"
 
-: "${DEBUG:="0"}"
-: "${UNATTENDED:="0"}"
-: "${TARGET_DIR:="$SCRIPT_DIR"}"
+lsu_module_init
 
-set -euo pipefail
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-bindir="${TARGET_DIR}/bin"
-WINEPREFIX="${TARGET_DIR}/pfx"
-LSU_LOGDIR="${TARGET_DIR}/log"
 LOGFILE="${LSU_LOGDIR}/pithouse_install.log"
-
-export WINEPREFIX
-export PATH="${bindir}:$PATH"
-
-if [[ $DEBUG == "1" ]]; then
-  set -x
-  export WINEDEBUG=${WINEDEBUG:-+seh,+loaddll,+module}
-else
-  export WINEDEBUG=${WINEDEBUG:--all}
-fi
-
-if [[ ! -x "${bindir}/wine" ]] || [[ ! -f "${WINEPREFIX}/system.reg" ]] \
-  || [[ ! -x "${bindir}/lsu-launch-wrapper" ]]
-then
-  echo -e "${RED}No linux-simracing-utils install found in ${TARGET_DIR}. Run install.sh first, or set TARGET_DIR to its install directory.${NC}"
-  exit 1
-fi
-
-mkdir -p "${LSU_LOGDIR}"
-echo "" > "$LOGFILE"
-
-# $2 is the answer a bare Enter gives, and picks which letter the hint
-# capitalises. Returns 0 for yes.
-confirm() {
-  local message="$1"
-  local default="${2:-Y}"
-  local hint="[Y/n]"
-  local reply
-
-  [[ "$default" == "N" ]] && hint="[y/N]"
-
-  while true; do
-    printf "${CYAN}"
-    read -rp "${message} ${hint} " reply
-    printf "${NC}"
-    reply="${reply:-$default}"
-    case "$reply" in
-      [Yy]) return 0 ;;
-      [Nn]) return 1 ;;
-      *) echo "Please enter y or n." ;;
-    esac
-  done
-}
-
-WORKDIR=$(mktemp -d)
-
-# A trapped signal has to exit itself, which then runs the EXIT trap.
-trap 'exit 130' SIGINT
-trap 'exit 143' SIGTERM
-trap 'rm -rf "$WORKDIR"' EXIT
 
 PITHOUSE_DIR="${WINEPREFIX}/drive_c/Program Files (x86)/MOZA Pit House"
 
@@ -115,35 +62,61 @@ pithouse_target_version() {
   grep -o -m1 'rs21\.pc\.pit_house/[^/]*$' <<< "$1" | cut -d / -f 2 || true
 }
 
-check_pithouse() {
-  echo -e "${CYAN}Checking for existing MOZA Pit House installation...${NC}"
+module_status() {
+  lsu_result installed "$(pithouse_installed_version)"
+  lsu_result available "$(pithouse_target_version "$(pithouse_repo_urls)")"
+}
 
+# Pit House updates itself when it starts, so an install that is already
+# there is only ever repaired, never updated, and that always asks first: a
+# repair removes the program folder.
+module_install() {
   local installed target repos
+
   installed="$(pithouse_installed_version)"
   repos="$(pithouse_repo_urls)"
   target="$(pithouse_target_version "$repos")"
 
-  if [[ "$UNATTENDED" != "1" ]]; then
-    if [[ -z "$installed" ]]; then
-      echo -e "${CYAN}MOZA Pit House is not installed.${NC}"
-      confirm "Install MOZA Pit House?" Y || { echo -e "${YELLOW}Skipping MOZA Pit House installation${NC}"; return; }
-    else
-      if [[ -n "$target" ]] && [[ "$installed" != "$target" ]]; then
-        echo -e "${CYAN}MOZA Pit House ${installed} is installed, ${target} is available.${NC}"
-        echo -e "${CYAN}Pit House updates itself when it starts, so a reinstall is only needed if that fails.${NC}"
-      else
-        echo -e "${CYAN}MOZA Pit House ${installed} is installed.${NC}"
-      fi
-      echo -e "${CYAN}A reinstall removes the Pit House program folder first. Settings and presets in Documents are not touched.${NC}"
-      confirm "Reinstall/repair MOZA Pit House?" N || { echo -e "${YELLOW}Skipping MOZA Pit House installation${NC}"; return; }
+  if [[ -n "$installed" ]]; then
+    if [[ "$UNATTENDED" == "1" ]]; then
+      lsu_skip "MOZA Pit House ${installed} is installed and updates itself, skipping."
     fi
+
+    if [[ -n "$target" ]] && [[ "$installed" != "$target" ]]; then
+      echo -e "${CYAN}MOZA Pit House ${installed} is installed, ${target} is available.${NC}"
+      echo -e "${CYAN}Pit House updates itself when it starts, so a reinstall is only needed if that fails.${NC}"
+    else
+      echo -e "${CYAN}MOZA Pit House ${installed} is installed.${NC}"
+    fi
+    echo -e "${CYAN}A reinstall removes the Pit House program folder first. Settings and presets in Documents are not touched.${NC}"
+    confirm "Reinstall/repair MOZA Pit House?" N \
+      || lsu_skip "Skipping MOZA Pit House installation"
+  elif [[ "$LSU_STANDALONE" == "1" ]] && [[ "$UNATTENDED" != "1" ]]; then
+    echo -e "${CYAN}MOZA Pit House is not installed.${NC}"
+    confirm "Install MOZA Pit House?" Y \
+      || lsu_skip "Skipping MOZA Pit House installation"
   fi
+
+  echo "" > "$LOGFILE"
+
+  lsu_require_dotnet_legacy_set
 
   if [[ -n "$installed" ]]; then
     remove_pithouse
   fi
 
   install_pithouse "$repos"
+
+  lsu_result version "$(pithouse_installed_version)"
+
+  # install.sh runs this again later anyway; a standalone run has only this.
+  module_fixup
+
+  echo -e "
+${YELLOW}Pit House only lists a MOZA device once Wine maps it to a COM port.${NC}
+If a connected device does not show up, check that it appears in
+${WINEPREFIX}/dosdevices as a comN link.
+"
 }
 
 # Matched on the install path and prefix, since other programs (the MOZA
@@ -169,8 +142,7 @@ remove_pithouse() {
   local i
 
   if pithouse_running; then
-    echo -e "${RED}MOZA Pit House is running. Close it and re-run this script.${NC}"
-    exit 1
+    lsu_fail "MOZA Pit House is running. Close it and re-run this script."
   fi
 
   echo -e "${CYAN}Removing the existing MOZA Pit House install...${NC}"
@@ -183,8 +155,7 @@ remove_pithouse() {
     sleep 1
   done
 
-  echo -e "${RED}The existing MOZA Pit House install could not be removed, see ${LOGFILE}${NC}"
-  exit 1
+  lsu_fail "The existing MOZA Pit House install could not be removed, see ${LOGFILE}"
 }
 
 # The package is an NSIS self-extractor that unpacks the Qt installer into
@@ -211,7 +182,7 @@ extract_pithouse_package() {
 
 install_pithouse() {
   local repos="$1"
-  local page_url package_url package_dir repo_list script_path
+  local package_url package_dir repo_list script_path
 
   echo -e "${CYAN}Installing MOZA Pit House...${NC}"
 
@@ -221,20 +192,17 @@ install_pithouse() {
     || true)"
 
   if [[ -z "$package_url" ]]; then
-    echo -e "${RED}Unable to find the MOZA Pit House download link on ${PITHOUSE_DOWNLOAD_PAGE}${NC}"
-    exit 1
+    lsu_fail "Unable to find the MOZA Pit House download link on ${PITHOUSE_DOWNLOAD_PAGE}"
   fi
 
-  if ! curl -sL --fail -o "${WORKDIR}/pithouse_package.exe" "$package_url"; then
-    echo -e "${RED}Failed to download MOZA Pit House from ${package_url}${NC}"
-    exit 1
+  if ! curl -sL --fail -o "${LSU_TMP}/pithouse_package.exe" "$package_url"; then
+    lsu_fail "Failed to download MOZA Pit House from ${package_url}"
   fi
 
-  package_dir="$(extract_pithouse_package "${WORKDIR}/pithouse_package.exe")"
+  package_dir="$(extract_pithouse_package "${LSU_TMP}/pithouse_package.exe")"
 
   if [[ -z "$package_dir" ]]; then
-    echo -e "${RED}Failed to unpack the MOZA Pit House package, see ${LOGFILE}${NC}"
-    exit 1
+    lsu_fail "Failed to unpack the MOZA Pit House package, see ${LOGFILE}"
   fi
 
   # Same fallback as Launcher.ps1: the list shipped in the package.
@@ -244,8 +212,7 @@ install_pithouse() {
   fi
 
   if [[ -z "$repos" ]]; then
-    echo -e "${RED}No MOZA Pit House repositories found for channel ${LSU_PITHOUSE_CHANNEL}.${NC}"
-    exit 1
+    lsu_fail "No MOZA Pit House repositories found for channel ${LSU_PITHOUSE_CHANNEL}."
   fi
 
   repo_list="$(paste -sd , <<< "$repos")"
@@ -253,12 +220,12 @@ install_pithouse() {
   # Launcher.ps1 hands the installer this control script, which tells Pit
   # House which firmware channel it was installed from.
   script_path="${package_dir}/MOZA_Installer_script.qs"
-  cat > "$script_path" << EOF
+  cat > "$script_path" << QS
 function Controller()
 {
     installer.setValue("experimentalFirmwareCommand", "${LSU_PITHOUSE_CHANNEL}")
 }
-EOF
+QS
 
   echo -e "${CYAN}Downloading and installing Pit House components, this can take several minutes...${NC}"
 
@@ -272,14 +239,13 @@ EOF
     echo -e "${RED}Installation failed for MOZA Pit House:"
     tail -n 50 "$LOGFILE"
     echo -e "Full log: ${LOGFILE}${NC}"
-    exit 1
+    lsu_fail "Installation failed for MOZA Pit House, see ${LOGFILE}"
   fi
 
   rm -rf "$package_dir"
 
   if [[ ! -f "${PITHOUSE_DIR}/MOZA Pit House.exe" ]]; then
-    echo -e "${RED}Installation failed for MOZA Pit House, see ${LOGFILE}${NC}"
-    exit 1
+    lsu_fail "Installation failed for MOZA Pit House, see ${LOGFILE}"
   fi
 
   install_pithouse_vcredist
@@ -305,24 +271,18 @@ install_pithouse_vcredist() {
   done
 }
 
-xdg_desktop_dir() {
-  local desktop_dir
-  desktop_dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
-  if [[ -z "$desktop_dir" || "$desktop_dir" == "$HOME" ]]; then
-    desktop_dir="$HOME/Desktop"
-  fi
-  printf '%s' "$desktop_dir"
-}
-
 # Wine writes Exec lines of the form:
 #   Exec=env "WINEPREFIX=<prefix>" wine "C:\\...\\MOZA Pit House.lnk"
 # where the bare "wine" is whatever is first on PATH, not the Wine install.sh
 # set up, and the target is the menu or desktop shortcut rather than the exe.
-# The launch wrapper runs the exe with the right Wine and prefix, the same as
-# install.sh does for SimHub and CrewChief.
-fix_pithouse_launchers() {
+# install.sh points it at the launch wrapper but keeps the .lnk, so this runs
+# after it, on every run, to aim the wrapper at the exe instead. Pit House
+# rewrites the launcher when it updates itself.
+module_fixup() {
   local root launcher_path
-  local exec_line="Exec=${bindir}/lsu-launch-wrapper "'"C:\\\\Program Files (x86)\\\\MOZA Pit House\\\\MOZA Pit House.exe"'
+  local exec_line="Exec=${LSU_BINDIR}/lsu-launch-wrapper "'"C:\\\\Program Files (x86)\\\\MOZA Pit House\\\\MOZA Pit House.exe"'
+
+  [[ -n "$(pithouse_installed_version)" ]] || return 0
 
   exec_line=${exec_line//\\/\\\\}
   exec_line=${exec_line//&/\\&}
@@ -332,15 +292,15 @@ fix_pithouse_launchers() {
 
   shopt -s globstar nullglob
 
-  for root in "$HOME/.local/share/applications/wine/Programs" "$(xdg_desktop_dir)"; do
+  while read -r root; do
     [[ -d "$root" ]] || continue
 
     for launcher_path in "$root"/**/"MOZA Pit House.desktop"; do
-      grep -qE "^Exec=.*(${WINEPREFIX}|lsu-launch-wrapper)" "$launcher_path" || continue
+      is_lsu_launcher "$launcher_path" || continue
 
       sed -i "s|^Exec=.*|${exec_line}|" "$launcher_path"
     done
-  done
+  done < <(lsu_launcher_roots)
 
   shopt -u globstar nullglob
 
@@ -349,12 +309,4 @@ fix_pithouse_launchers() {
   fi
 }
 
-check_pithouse
-
-fix_pithouse_launchers
-
-echo -e "
-${YELLOW}Pit House only lists a MOZA device once Wine maps it to a COM port.${NC}
-If a connected device does not show up, check that it appears in
-${WINEPREFIX}/dosdevices as a comN link.
-"
+lsu_module_dispatch "$@"

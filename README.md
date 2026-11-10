@@ -41,6 +41,12 @@ curl -fsSL https://raw.githubusercontent.com/srounce/linux-simracing-utils/maste
 
 It asks where to install (default `~/linux-simracing-utils`) and puts a copy of `install.sh` there for re-runs and updates. Then skip to step 4.
 
+To pick the programs up front instead of from the menu, pass `--modules` through to the installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srounce/linux-simracing-utils/master/install.sh | bash -s -- --modules simhub,crewchief
+```
+
 To install from a clone instead:
 
 1. Open a terminal and download the installer:
@@ -63,9 +69,24 @@ To install from a clone instead:
    bash install.sh
    ```
 
-4. Follow the prompts. The installer will ask whether you want to install or skip each component — Wine, SimHub, CrewChief, and Winecarte. You can safely press Enter to accept the defaults.
+4. Follow the prompts. The installer asks which Wine channel to use (press Enter for the default, see [Wine channel](#wine-channel)), then shows a menu of programs to install:
 
-The installer will download and set everything up, including its own Wine build and a dedicated Wine environment so SimHub and CrewChief don't interfere with any other Wine applications you might have.
+   ```
+   Programs to install or update:
+      1) [ ] SimHub                   not installed
+              Dashboards, overlays, bass shakers and motion
+      2) [ ] CrewChief                not installed
+              Spotter and virtual race engineer
+      3) [ ] MOZA Pit House           not installed
+              Settings and firmware for MOZA wheelbases, wheels and pedals
+      4) [ ] Richard Burns Rally RSF  not installed
+              The RallySimFans build of Richard Burns Rally
+   Numbers to toggle (e.g. 1 3), a for all, n for none, Enter to continue:
+   ```
+
+   Type the numbers of the programs you want, then press Enter. Programs that are already installed start out ticked.
+
+The installer always sets up its own Wine build, a dedicated Wine environment (so these programs don't interfere with any other Wine applications you might have) and Winecarte. Each program is then installed by its own small script, a *module*, which the installer downloads the first time you pick it.
 
 ---
 
@@ -85,44 +106,51 @@ Winehub starts automatically in the background when you open either app, bridgin
 
 ---
 
-## MOZA Pit House (optional)
+## MOZA Pit House
 
-`install-pithouse.sh` installs [MOZA Pit House](https://mozaracing.com/downloads) into the same Wine environment.
-
-> **Note:** Pit House currently requires Wine `sangria-11.18-pre3` or newer, and `install.sh` will not install it automatically. Pin it before installing Pit House (see [Updating SimHub or CrewChief](#updating-simhub-or-crewchief) for how Wine pins work):
->
-> ```bash
-> LSU_WINE_VERSION=sangria-11.18-pre3 bash install.sh
-> ```
-
-Run `install.sh` first, then run this from the same folder:
+Pick **MOZA Pit House** in the installer's menu, or run:
 
 ```bash
-bash install-pithouse.sh
-```
-
-If you used the one-line install, the folder only has `install.sh`, so download this script into it first:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/srounce/linux-simracing-utils/master/install-pithouse.sh \
-  -o ~/linux-simracing-utils/install-pithouse.sh
+bash install.sh --modules pithouse
 ```
 
 It downloads MOZA's online installer and installs the current release without any installer windows. This takes a few minutes. Pit House then appears in your application menu, and it updates itself when it starts.
 
-Re-running the script on an existing install offers a repair. A repair removes the Pit House program folder and installs it again. Your settings and presets in Documents are not touched.
+Pit House needs Wine `sangria-11.18-pre3` or newer. The default prerelease channel has that. If you are on the release channel and it is older, the installer offers to switch channel for you.
+
+Picking Pit House again on an existing install offers a repair. A repair removes the Pit House program folder and installs it again. Your settings and presets in Documents are not touched.
 
 To install from a MOZA channel other than `release`:
 
 ```bash
-LSU_PITHOUSE_CHANNEL=1.4.1-beta bash install-pithouse.sh
+LSU_PITHOUSE_CHANNEL=1.4.1-beta bash install.sh --modules pithouse
 ```
 
 Logs go to `log/pithouse_install.log`.
 
 ---
 
-## Updating SimHub or CrewChief
+## Richard Burns Rally (RSF)
+
+Pick **Richard Burns Rally RSF** in the installer's menu, or run:
+
+```bash
+bash install.sh --modules rsf
+```
+
+rallysimfans.hu does not allow scripted downloads, so download `Rallysimfans_Installer.exe` from the [RSF download page](https://rallysimfans.hu/rbr/download.php?download=rsfrbr) in your browser first. The module looks for it in your Downloads folder and in the install folder, or you can point it at a file with `LSU_RSF_INSTALLER=/path/to/Rallysimfans_Installer.exe`. If it can't find one, it asks for the path.
+
+The RSF installer then opens in its own window and you work through it as you would on Windows. RSF's base game files come from its torrent. If you have already downloaded that, point the installer at the folder. Drive `Z:` in the installer is your Linux file system. When the installer is closed, the module sets the DLL overrides the game needs (`d3d9`, `dinput8` and the old Visual C++ runtimes the game ships with). These apply only to the Richard Burns Rally executables, not to the rest of the Wine environment. The installer's shortcuts then appear in your application menu. They start the game with this project's Wine directly, without the winehub bridge SimHub and CrewChief use: RBR is in the same Wine environment as SimHub, so SimHub reads its telemetry directly.
+
+Picking it again on an existing install opens the RSF installer again, where you can repair the install or change what is installed. Because the installer needs you at the keyboard, `UNATTENDED=1` never runs it.
+
+If you installed RSF into the Wine environment some other way, re-running `install.sh` adds the DLL overrides if they are missing and points the RSF shortcuts at Wine directly. It leaves alone any override you have changed in `winecfg`.
+
+Logs go to `log/rsf_install.log`.
+
+---
+
+## Updating
 
 Re-run the installer at any time to update to the latest versions:
 
@@ -130,7 +158,14 @@ Re-run the installer at any time to update to the latest versions:
 bash install.sh
 ```
 
-It checks the installed version of each component against the latest release and only offers an update when there actually is one. Anything already up to date is offered as a reinstall/repair instead, and pressing Enter skips it, so a re-run costs nothing if you only need the launchers fixing up.
+Wine, the Wine environment and Winecarte are always brought up to date. In the program menu, installed programs start out ticked and show whether an update is available. A ticked program that is already up to date is offered as a reinstall/repair instead, and pressing Enter skips it, so a re-run costs nothing if you only need the launchers fixing up. Untick a program to leave it alone this run. Unticking does not uninstall it.
+
+To run without any prompts, set `UNATTENDED=1`. That installs what `--modules` names, or, without `--modules`, updates the programs that are already installed:
+
+```bash
+UNATTENDED=1 bash install.sh
+UNATTENDED=1 bash install.sh --modules simhub,crewchief
+```
 
 To follow Winecarte prereleases, or to pin a specific release:
 
@@ -139,23 +174,40 @@ LSU_WINECARTE_PRERELEASE=1 bash install.sh
 LSU_WINECARTE_VERSION=v0.4.0 bash install.sh
 ```
 
-To have the installer self-update from a branch other than master:
+To have the installer, and the modules it downloads, update from a branch other than master:
 
 ```bash
 LSU_BRANCH=my-feature bash install.sh
 ```
 
-The installed copy of `install.sh` keeps that branch as its default, so later runs follow it without setting `LSU_BRANCH` again.
+The installed copy of `install.sh` keeps that branch as its default, so later runs follow it without setting `LSU_BRANCH` again. `LSU_REPO=owner/linux-simracing-utils` does the same for a fork.
 
-To pin a specific Wine release:
+### Wine channel
+
+The installer uses its own Wine build, [sangria](https://github.com/srounce/wine). It asks which channel to follow on every interactive run, with your last choice as the default:
+
+- **prerelease** (default): the newest build, prereleases included.
+- **release**: full releases only. These change less often, but some programs need a newer Wine than the latest full release (see [MOZA Pit House](#moza-pit-house)).
+
+Switching to an older Wine than the one installed asks before downgrading, because programs in the Wine environment may not work with an older Wine.
+
+To choose without being asked:
+
+```bash
+LSU_WINE_CHANNEL=release bash install.sh
+```
+
+To pin a specific Wine release instead of following a channel:
 
 ```bash
 LSU_WINE_VERSION=sangria-11.18-pre3 bash install.sh
 ```
 
-The pin is kept in the installed copy of `install.sh` the same way. `LSU_WINE_VERSION=latest` removes it and returns to the newest release.
+`LSU_WINE_VERSION=latest` removes the pin and returns to the channel.
 
-`LSU_WINE_REPO=owner/repo` takes Wine releases from another GitHub repository, and is kept the same way. The default is `srounce/wine`.
+`LSU_WINE_REPO=owner/repo` takes Wine releases from another GitHub repository. The default is `srounce/wine`.
+
+These settings are kept in `var/lsu.conf` and apply to later runs too. Pins kept in `install.sh` by older versions of the installer are moved there automatically.
 
 ---
 
@@ -167,7 +219,7 @@ Re-run the installer from the new location:
 bash install.sh
 ```
 
-This will also fix up the desktop launchers for SimHub and CrewChief to point to the new location.
+This will also fix up the desktop launchers for the installed programs to point to the new location.
 
 ---
 
@@ -175,11 +227,35 @@ This will also fix up the desktop launchers for SimHub and CrewChief to point to
 
 ```
 install.sh       # the installer
-install-pithouse.sh  # optional MOZA Pit House installer
+lib/             # code shared by the installer and the modules
+modules/         # one install script per program, downloaded when first picked
+modules/local/   # your own modules (see below)
 bin/             # helper scripts and tools (created by the installer)
 pfx/             # the Wine environment (created by the installer)
+var/             # Wine, settings (lsu.conf) and other installer state
 log/             # install and runtime logs (created by the installer)
 ```
+
+---
+
+## Writing a module
+
+Each program the installer offers is a module: a bash script in `modules/` that the installer runs as `<id>.sh status`, `<id>.sh install` and so on, and that reports back through its exit status and a few `key=value` results. [`modules/example.sh`](modules/example.sh) is a working template, and its header describes the whole contract.
+
+To add your own:
+
+1. Copy `modules/example.sh` to `modules/local/<id>.sh` in your install folder, where `<id>` is a short lower-case name.
+2. Set `LSU_MODULE_ID` to the same `<id>`, give it a name and description, and fill in the `module_status` and `module_install` functions.
+3. Re-run `install.sh`. Your module appears in the menu, marked `(local)`.
+
+The installer never touches `modules/local/`, so updates won't overwrite your module. A local module with the same id as a published one replaces it. Modules also run on their own, which is handy while writing one:
+
+```bash
+bash modules/local/<id>.sh status
+bash modules/local/<id>.sh install
+```
+
+To share a module with everyone, open a pull request that adds it to `modules/` and gives it a line in `modules/index`.
 
 ---
 
@@ -187,7 +263,7 @@ log/             # install and runtime logs (created by the installer)
 
 Not receiving telemetry after an update? Re-run `install.sh` to repair the desktop launcher entries in the prefix.
 
-Install logs are saved to the `log/` folder inside the project directory. If something goes wrong during installation, check the relevant log file there for details.
+Install logs are saved to the `log/` folder inside the project directory. The installer ends with a summary of what each program's module did. If something goes wrong during installation, check the relevant log file there for details.
 
 If you need to debug runtime issues, you can enable verbose output by setting `DEBUG=1` before running any of the scripts:
 
