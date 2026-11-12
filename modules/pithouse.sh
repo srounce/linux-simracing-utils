@@ -109,7 +109,8 @@ module_install() {
 
   lsu_result version "$(pithouse_installed_version)"
 
-  # install.sh runs this again later anyway; a standalone run has only this.
+  # install.sh runs these again later anyway; a standalone run has only this.
+  lsu_update_launchers
   module_fixup
 
   echo -e "

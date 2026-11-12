@@ -104,6 +104,8 @@ Once installation is complete, SimHub and CrewChief will appear in your applicat
 
 Winehub starts automatically in the background when you open either app, bridging the game's shared memory into Wine so SimHub and CrewChief can read the telemetry. It shuts down cleanly when you close the apps. You don't need to do anything special to make it work.
 
+The application menu and desktop entries always start this project's Wine by its full path, never whichever `wine` comes first on your `PATH`. Wine's own launcher writer can't do that, so it is switched off in the Wine environment, and the launchers are written by `install.sh` instead. When an app saves a new shortcut while it runs, for example during an update, its launcher appears once every program in the Wine environment has closed, if one of them was started through winehub. You can also write them straight away with `bin/lsu-update-launchers`. After a session it logs to `log/launchers.log`.
+
 ---
 
 ## MOZA Pit House
@@ -140,11 +142,15 @@ bash install.sh --modules rsf
 
 rallysimfans.hu does not allow scripted downloads, so download `Rallysimfans_Installer.exe` from the [RSF download page](https://rallysimfans.hu/rbr/download.php?download=rsfrbr) in your browser first. The module looks for it in your Downloads folder and in the install folder, or you can point it at a file with `LSU_RSF_INSTALLER=/path/to/Rallysimfans_Installer.exe`. If it can't find one, it asks for the path.
 
-The RSF installer then opens in its own window and you work through it as you would on Windows. RSF's base game files come from its torrent. If you have already downloaded that, point the installer at the folder. Drive `Z:` in the installer is your Linux file system. When the installer is closed, the module sets the DLL overrides the game needs (`d3d9`, `dinput8` and the old Visual C++ runtimes the game ships with). These apply only to the Richard Burns Rally executables, not to the rest of the Wine environment. The installer's shortcuts then appear in your application menu. They start the game with this project's Wine directly, without the winehub bridge SimHub and CrewChief use: RBR is in the same Wine environment as SimHub, so SimHub reads its telemetry directly.
+The RSF installer then opens in its own window and you work through it as you would on Windows. RSF's base game files come from its torrent. If you have already downloaded that, point the installer at the folder. Drive `Z:` in the installer is your Linux file system. When the installer is closed, the module sets the DLL overrides the game needs (`d3d9`, `dinput8` and the old Visual C++ runtimes the game ships with). It also turns off Wine's incomplete ICU DLLs for the RSF launcher, a .Net 10 program that would otherwise quit on start, so that .Net uses Windows' own globalization functions instead. These overrides apply only to the RSF launcher and the Richard Burns Rally executables, not to the rest of the Wine environment. The installer's shortcuts then appear in your application menu, set up like the SimHub and CrewChief ones. RBR is in the same Wine environment as SimHub, so SimHub reads its telemetry directly.
+
+The RSF installer also runs Microsoft's DirectX web setup, which crashes under Wine and may show a crash window or backtrace. The RSF installer carries on regardless. The game itself only uses DirectX DLLs that Wine already provides.
+
+Before the RSF installer runs, the module installs Microsoft's Visual C++ 2015-2022 runtime (x86 and x64) with winetricks. The RSF launcher refuses to start with Wine's own `msvcp140.dll`, and Microsoft's installer won't replace it, so the module puts Microsoft's in place itself where winetricks doesn't.
 
 Picking it again on an existing install opens the RSF installer again, where you can repair the install or change what is installed. Because the installer needs you at the keyboard, `UNATTENDED=1` never runs it.
 
-If you installed RSF into the Wine environment some other way, re-running `install.sh` adds the DLL overrides if they are missing and points the RSF shortcuts at Wine directly. It leaves alone any override you have changed in `winecfg`.
+If you installed RSF into the Wine environment some other way, re-running `install.sh` adds the DLL overrides and the Visual C++ runtime if they are missing. It leaves alone any override you have changed in `winecfg`.
 
 Logs go to `log/rsf_install.log`.
 

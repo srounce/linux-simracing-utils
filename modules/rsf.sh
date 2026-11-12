@@ -9,9 +9,6 @@
 # shared prefix and sets the DLL overrides the game folder needs.
 # rallysimfans.hu refuses scripted downloads, so the user downloads the
 # installer and this module looks for it.
-#
-# RBR shares the prefix only so SimHub can read its telemetry directly, so
-# its launchers start plain Wine rather than the launch wrapper and winehub.
 
 for LSU_LIB in "${LSU_LIB:-}" "$(dirname -- "${BASH_SOURCE[0]}")"/{..,../..}/lib/lsu-common.sh; do
   [[ -f "$LSU_LIB" ]] && break
@@ -36,11 +33,14 @@ RSF_DEFAULT_DIR="${WINEPREFIX}/drive_c/Richard Burns Rally"
 # under Wow6432Node, since the installer is 32-bit.
 RSF_REG_KEYS=('Software\Wow6432Node\Rallysimfans RBR' 'Software\Rallysimfans RBR')
 
+# DLL overrides, set per executable so nothing else in the shared prefix is
+# affected. An empty load order disables the DLL.
+#
 # The game folder ships its own copies of these. d3d9 is whichever wrapper
 # (DXVK, dgVoodoo) the RSF launcher has put in place; without it Wine's own is
-# used. Set per executable so nothing else in the shared prefix is affected.
+# used.
 RSF_GAME_EXES=(RichardBurnsRally_SSE.exe RichardBurnsRally_NoSSE.exe RichardBurnsRally.exe)
-RSF_DLL_OVERRIDES=(
+RSF_GAME_OVERRIDES=(
   d3d9=native,builtin
   dinput8=native,builtin
   mfc70=native
@@ -51,6 +51,26 @@ RSF_DLL_OVERRIDES=(
   msvcr70=native
   msvcr71=native
 )
+# The launcher is a .Net 10 app, and .Net loads ICU when it finds one. Wine
+# only has stubs of it, which fail ("Cannot get symbol u_charsToUChars from
+# libicuuc") and the launcher exits. Without any, .Net falls back to Windows'
+# own globalization functions, which Wine implements.
+RSF_LAUNCHER_EXE=RSF_Launcher.exe
+RSF_LAUNCHER_OVERRIDES=(icu= icuuc= icuin=)
+
+# Every override as "<exe> <dll>=<load order>".
+rsf_overrides() {
+  local exe override
+
+  for exe in "${RSF_GAME_EXES[@]}"; do
+    for override in "${RSF_GAME_OVERRIDES[@]}"; do
+      echo "${exe} ${override}"
+    done
+  done
+  for override in "${RSF_LAUNCHER_OVERRIDES[@]}"; do
+    echo "${RSF_LAUNCHER_EXE} ${override}"
+  done
+}
 
 # Read straight from system.reg so a status check never starts Wine. Wine
 # writes the file lazily, so right after the installer has run use
@@ -210,6 +230,9 @@ EOF
 
   echo "" > "$RSF_LOG"
 
+  # The RSF launcher refuses to start without Microsoft's own runtime.
+  lsu_require_vcrun2022
+
   # A GUI installer's exit status says little: a cancelled install also exits
   # cleanly. The game files are checked instead.
   wine "$installer" >> "$RSF_LOG" 2>&1 || true
@@ -222,8 +245,6 @@ EOF
   fi
 
   rsf_apply_dll_overrides
-  # install.sh does this again in fixup; a standalone run has only this.
-  rsf_unwrap_launchers "$(rsf_game_dir "$install_path")"
 
   lsu_result version "$version"
 
@@ -241,12 +262,10 @@ rsf_apply_dll_overrides() {
 
   {
     printf 'Windows Registry Editor Version 5.00\r\n'
-    for exe in "${RSF_GAME_EXES[@]}"; do
+    while read -r exe override; do
       printf '\r\n[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\%s\\DllOverrides]\r\n' "$exe"
-      for override in "${RSF_DLL_OVERRIDES[@]}"; do
-        printf '"%s"="%s"\r\n' "${override%%=*}" "${override#*=}"
-      done
-    done
+      printf '"%s"="%s"\r\n' "${override%%=*}" "${override#*=}"
+    done < <(rsf_overrides)
   } > "$regfile"
 
   wine reg import "Z:${regfile//\//\\}" >> "$RSF_LOG" 2>&1 \
@@ -260,89 +279,23 @@ rsf_dll_overrides_missing() {
 
   [[ -f "${WINEPREFIX}/user.reg" ]] || return 0
 
-  for exe in "${RSF_GAME_EXES[@]}"; do
+  while read -r exe override; do
     section="$(sed -n "/^\[Software\\\\\\\\Wine\\\\\\\\AppDefaults\\\\\\\\${exe//./\\.}\\\\\\\\DllOverrides\]/I,/^\[/p" \
       "${WINEPREFIX}/user.reg")"
-    for override in "${RSF_DLL_OVERRIDES[@]}"; do
-      grep -qiF "\"${override%%=*}\"=" <<< "$section" || return 0
-    done
-  done
+    grep -qiF "\"${override%%=*}\"=" <<< "$section" || return 0
+  done < <(rsf_overrides)
 
   return 1
-}
-
-# install.sh points every launcher in the prefix at the launch wrapper before
-# the module fixups run, and the RSF launchers do not want it. Wine writes
-# them to run a bare "wine", whatever is first on PATH, so they are pointed at
-# the bundled one instead. They are told apart by their working directory,
-# the game folder, and marked so that they are still found after the install
-# folder has moved and neither the old prefix nor the wrapper is in them.
-rsf_sed_escape() {
-  local s="$1"
-
-  s=${s//\\/\\\\}
-  s=${s//&/\\&}
-  s=${s//|/\\|}
-  printf '%s' "$s"
-}
-
-# Whether directory $1 is $2 or inside it.
-rsf_path_within() {
-  local path
-
-  path="$(realpath -m -- "$1")"
-  [[ "$path" == "$2" || "$path" == "$2"/* ]]
-}
-
-rsf_unwrap_launchers() {
-  local dir root launcher_path path changed=0
-  local marker="X-LSU-Module=${LSU_MODULE_ID}"
-  local exec_line="Exec=env \"WINEPREFIX=${WINEPREFIX}\" WINEDEBUG=-all \"${LSU_BINDIR}/wine\" \"C:"
-
-  dir="$(realpath -m -- "$1")"
-
-  shopt -s globstar nullglob
-
-  while read -r root; do
-    [[ -d "$root" ]] || continue
-
-    for launcher_path in "$root"/**/*.desktop; do
-      path="$(sed -n 's/^Path=//p' "$launcher_path" | head -n1)"
-
-      if grep -qxF "$marker" "$launcher_path"; then
-        # Moved install folder: the old working directory is gone too.
-        if [[ -z "$path" ]] || ! rsf_path_within "$path" "$dir"; then
-          sed -i "s|^Path=.*|Path=$(rsf_sed_escape "$dir")|" "$launcher_path"
-          changed=1
-        fi
-      elif is_lsu_launcher "$launcher_path" && [[ -n "$path" ]] \
-        && rsf_path_within "$path" "$dir"
-      then
-        echo "$marker" >> "$launcher_path"
-      else
-        continue
-      fi
-
-      grep -qF -- "$exec_line" "$launcher_path" && continue
-
-      sed -i "s|^Exec=.* \"\\?C:|$(rsf_sed_escape "$exec_line")|" "$launcher_path"
-      changed=1
-    done
-  done < <(lsu_launcher_roots)
-
-  shopt -u globstar nullglob
-
-  if (( changed )); then
-    echo -e "${CYAN}Pointed the Richard Burns Rally launchers at Wine directly.${NC}"
-    lsu_refresh_desktop_database
-  fi
 }
 
 # Also covers games installed before this module existed, or by hand.
 module_fixup() {
   [[ -n "$(rsf_installed_version)" ]] || return 0
 
-  rsf_unwrap_launchers "$(rsf_game_dir "$(rsf_reg_file InstallPath)")"
+  # For installs from before the module required it, or where another
+  # program's bundled runtime installer left Wine's msvcp140 in place; see
+  # lsu_require_vcrun2022. Nothing to do once it is there.
+  lsu_has_vcrun2022 || lsu_require_vcrun2022
 
   rsf_dll_overrides_missing || return 0
 

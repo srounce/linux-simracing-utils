@@ -63,11 +63,15 @@
 #   lsu_require_dotnet_runtime VERB FRAMEWORK VERSION LABEL   winetricks .Net
 #   lsu_require_dotnet_bundle CHANNEL BUNDLE FRAMEWORK LABEL  Microsoft .Net
 #   lsu_require_winetricks VERB [MARKER [LABEL]]  any winetricks verb
+#   lsu_require_vcrun2022                        Visual C++ 2015-2022, x86+x64
 #   lsu_require_corefonts                        (already in every prefix)
 #   lsu_launcher_roots / is_lsu_launcher FILE    find this prefix's launchers
+#   lsu_update_launchers                         write and patch launchers now
 #
-# Every launcher Wine writes for this prefix is pointed at the launch wrapper
-# by install.sh after the modules have run, so modules need not do that.
+# Wine does not write launchers in this prefix itself, as it would point them
+# at whatever "wine" is first on PATH. After the modules have run, install.sh
+# writes them for the shortcuts the installers saved and points every one at
+# the bundled Wine through the launch wrapper, so modules need not do that.
 
 # Finds the shared library under install.sh or standalone. Keep as is.
 for LSU_LIB in "${LSU_LIB:-}" "$(dirname -- "${BASH_SOURCE[0]}")"/{..,../..}/lib/lsu-common.sh; do

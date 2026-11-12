@@ -33,6 +33,10 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 : "${DEBUG:="0"}"
 : "${UNATTENDED:="0"}"
 : "${TARGET_DIR:="$SCRIPT_DIR"}"
+# Every path in the prefix's launchers is built from this, and they are told
+# apart from other prefixes' by plain text matching, so a trailing slash or a
+# relative path must not change it. Symlinks are kept as given.
+TARGET_DIR="$(realpath -ms -- "$TARGET_DIR")"
 
 LSU_ARGS=("$@")
 
@@ -310,6 +314,10 @@ fi
 bindir="${TARGET_DIR}/bin"
 vardir="${TARGET_DIR}/var"
 mkdir -p "${bindir}" "${vardir}"
+# The names the library uses for them.
+LSU_TARGET_DIR="$TARGET_DIR"
+LSU_BINDIR="$bindir"
+LSU_VARDIR="$vardir"
 
 export PATH="${bindir}:$PATH"
 
@@ -373,7 +381,8 @@ setup_prefix() {
 
   mkdir -p $WINEPREFIX
 
-  WINEDLLOVERRIDES="mscoree,mshtml=" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  # winemenubuilder as lsu_disable_menubuilder explains, until it has run.
+  WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   # wineboot returns before the wineserver has written the registry to disk.
   wineserver -w
 
@@ -391,6 +400,16 @@ set_registry_entries() {
 
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+
+  # Some distributions export where the Linux .Net lives for every session
+  # (Arch's dotnet packages do). Wine passes that on, and Windows .Net then
+  # looks for its runtime there and asks for .Net to be installed. Values set
+  # here win over the Linux ones; they are where .Net installs itself anyway.
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT     /t REG_SZ /d 'C:\Program Files\dotnet'       /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT_X64 /t REG_SZ /d 'C:\Program Files\dotnet'       /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT_X86 /t REG_SZ /d 'C:\Program Files (x86)\dotnet' /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+
+  lsu_disable_menubuilder
 
   # Flush the registry to disk before winetricks reads the prefix.
   wineserver -w
@@ -824,12 +843,12 @@ cleanup_stale_pids
 # the wrapper still waits so stdout/stderr and the exit status behave as if wine
 # were run directly.
 if [ ! -f "\$WINEHUB_PIDFILE" ] || ! kill -0 "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null; then
-  wine "\$@" &
+  "${bindir}/wine" "\$@" &
   wine_pid=\$!
   "${bindir}/lsu-winehub-manager" &
   wait "\$wine_pid"
 else
-  exec wine "\$@"
+  exec "${bindir}/wine" "\$@"
 fi
 EOF
   chmod +x "${bindir}/lsu-launch-wrapper"
@@ -847,12 +866,39 @@ export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
 echo \$! > "\$WINEHUB_PIDFILE"
 
 sleep 2
-wineserver -w
+"${bindir}/wineserver" -w
 
 kill "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null
 rm -f "\$WINEHUB_PIDFILE"
+
+# Launchers for any shortcuts the session's programs saved, updates included.
+"${bindir}/lsu-update-launchers" >> "${LSU_LOGDIR}/launchers.log" 2>&1
 EOF
   chmod +x "${bindir}/lsu-winehub-manager"
+
+  cat > "${bindir}/lsu-update-launchers" << EOF
+#!/usr/bin/env bash
+# Writes launchers for the shortcuts programs in the prefix saved since the
+# last run, pointed at the bundled Wine. Run when a wrapped session ends, and
+# safe to run by hand; install.sh does the same on every run.
+
+set -uo pipefail
+
+export WINEPREFIX="${WINEPREFIX}"
+export WINEDEBUG=-all
+export PATH="${bindir}:\$PATH"
+
+LSU_TARGET_DIR="${TARGET_DIR}"
+LSU_BINDIR="${bindir}"
+LSU_VARDIR="${vardir}"
+LSU_LOGDIR="${LSU_LOGDIR}"
+
+source "${TARGET_DIR}/lib/lsu-common.sh"
+
+date
+lsu_update_launchers --new
+EOF
+  chmod +x "${bindir}/lsu-update-launchers"
 }
 
 install_hidraw_device() {
@@ -1040,43 +1086,9 @@ EOF
 fix_desktop_launchers() {
   echo -e "${CYAN}Patching desktop launchers...${NC}"
 
-  local root
-  while read -r root; do
-    patch_desktop_launchers_in "$root"
-  done < <(lsu_launcher_roots)
-
-  lsu_refresh_desktop_database
+  lsu_update_launchers
 
   echo -e "${CYAN}Desktop launchers successfully patched.${NC}"
-}
-
-# Wine writes Exec lines of the form:
-#   Exec=env "WINEPREFIX=<prefix>" wine "C:\\Program Files\\App\\App.exe"
-# Everything ahead of the Windows path is replaced by the launch wrapper so the
-# app runs under winehub.
-patch_desktop_launcher() {
-  local launcher_path="$1"
-
-  sed -i "s|^Exec=.* \\(\"\\)\\?C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
-}
-
-# Launchers are discovered by scanning rather than named individually, so every
-# entry the wine installers generate is covered.
-patch_desktop_launchers_in() {
-  local root="$1"
-  local launcher_path
-
-  [[ -d "$root" ]] || return 0
-
-  shopt -s globstar
-
-  for launcher_path in "$root"/**/*.desktop; do
-    [[ -f "$launcher_path" ]] || continue
-
-    if is_lsu_launcher "$launcher_path"; then
-      patch_desktop_launcher "$launcher_path"
-    fi
-  done
 }
 
 # ---------------------------------------------------------------------------

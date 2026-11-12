@@ -202,14 +202,79 @@ lsu_require_winetricks() {
 
   pin_winetricks_wine_arch
 
+  # A verb in winetricks.log counts as installed, and winetricks skips it. The
+  # callers that pass no marker check for themselves, so a repair is forced.
+  local force=()
+  grep -qxF "$verb" "${WINEPREFIX}/winetricks.log" 2> /dev/null && force=(--force)
+
   echo -e "${CYAN}Installing ${label}...${NC}"
-  if ! WINE=$SILENT_WINE winetricks -q "${verb}" > "$logfile" 2>&1; then
+  if ! WINE=$SILENT_WINE winetricks -q "${force[@]}" "${verb}" > "$logfile" 2>&1; then
     echo -e "${RED}Installation failed for ${label}:"
     tail -n 50 "$logfile"
     echo -e "Full log: ${logfile}${NC}"
     exit 1
   fi
   echo -e "${GREEN}Successfully installed ${label}${NC}"
+}
+
+# Microsoft's Visual C++ 2015-2022 runtime, x86 and x64. Wine has its own
+# msvcp140 and vcruntime140, versioned higher than Microsoft's, so Microsoft's
+# installer, which programs often bundle and run, leaves Wine's msvcp140 in
+# place (https://bugs.winehq.org/show_bug.cgi?id=57518). A program that checks
+# for the real runtime then refuses to start. winetricks swaps the DLL in by
+# hand, so only Microsoft's own DLLs, in both builds, count as installed.
+lsu_has_vcrun2022() {
+  local dir dll file
+
+  for dir in system32 syswow64; do
+    for dll in msvcp140 vcruntime140; do
+      file="${WINEPREFIX}/drive_c/windows/${dir}/${dll}.dll"
+      [[ -f "$file" ]] || return 1
+      ! grep -qaF 'Wine builtin DLL' "$file" || return 1
+    done
+  done
+}
+
+lsu_replace_msvcp140() {
+  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/winetricks/vcrun2022"
+  local logfile="${LSU_LOGDIR}/vcrun2022_install.log"
+  local spec exe cab arch dir work
+
+  # Package, the cabinet in it holding the DLLs, their suffix, and where they
+  # go in a 64-bit prefix. The cabinet names are winetricks' own.
+  for spec in "vc_redist.x86.exe a10 x86 syswow64" "vc_redist.x64.exe a12 amd64 system32"; do
+    read -r exe cab arch dir <<< "$spec"
+    work="${LSU_TMP}/vcrun2022-${arch}"
+    mkdir -p "$work"
+
+    {
+      cabextract -q -d "$work" -F "$cab" "${cache}/${exe}" \
+        && cabextract -q -d "$work" -F "msvcp140.dll_${arch}" "${work}/${cab}" \
+        && cp "${work}/msvcp140.dll_${arch}" "${WINEPREFIX}/drive_c/windows/${dir}/msvcp140.dll"
+    } >> "$logfile" 2>&1 \
+      || echo -e "${YELLOW}Unable to put Microsoft's msvcp140.dll (${arch}) in place, see ${logfile}${NC}"
+  done
+}
+
+lsu_require_vcrun2022() {
+  local label="Visual C++ 2015-2022 runtime"
+
+  if lsu_has_vcrun2022; then
+    echo -e "${GREEN}Found existing ${label} install.${NC}"
+    return
+  fi
+
+  lsu_require_winetricks vcrun2022 "" "$label"
+
+  # winetricks 20260125 extracts msvcp140.dll from Microsoft's packages for
+  # this, but inside them it is now msvcp140.dll_x86 and msvcp140.dll_amd64,
+  # so nothing is extracted and Wine's stays. Same packages, from its cache.
+  lsu_has_vcrun2022 || lsu_replace_msvcp140
+
+  if ! lsu_has_vcrun2022; then
+    echo -e "${RED}${label} was installed, but Wine's own msvcp140 or vcruntime140 is still in place. See ${LSU_LOGDIR}/vcrun2022_install.log${NC}"
+    exit 1
+  fi
 }
 
 lsu_require_corefonts() {
@@ -361,11 +426,221 @@ lsu_launcher_roots() {
 
 # A launcher is ours if wine generated it against our prefix, or if an earlier
 # install already wrapped it. Matching wrapped entries as well means a reinstall
-# to a different TARGET_DIR repoints them.
+# to a different TARGET_DIR repoints them. X-LSU-Module marked RSF launchers
+# that ran Wine directly, before it used the wrapper too.
 is_lsu_launcher() {
   local launcher_path="$1"
 
-  grep -qE "^Exec=.*(${WINEPREFIX}|lsu-launch-wrapper)" "$launcher_path"
+  grep -qE "^Exec=.*(${WINEPREFIX}|lsu-launch-wrapper)" "$launcher_path" \
+    || grep -q '^X-LSU-Module=' "$launcher_path"
+}
+
+lsu_sed_escape() {
+  local s="$1"
+
+  s=${s//\\/\\\\}
+  s=${s//&/\\&}
+  s=${s//|/\\|}
+  printf '%s' "$s"
+}
+
+# The Windows path a launcher's Exec value ($1) starts, written as it goes
+# inside double quotes in an Exec line. Wine writes it in double quotes; KDE
+# rewrites an entry it has saved with single quotes, inside which a backslash
+# is only escaped once. A shortcut straight to a program is written with its
+# arguments after the path, which are dropped when there are none (""). Fails
+# for anything else.
+lsu_launcher_target() {
+  local dq='"([A-Za-z]:[^"]*)"([[:space:]]+"")?[[:space:]]*$'
+  local sq="'([A-Za-z]:[^']*)'([[:space:]]+'')?[[:space:]]*\$"
+  local target
+
+  if [[ "$1" =~ $dq ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  elif [[ "$1" =~ $sq ]]; then
+    target="${BASH_REMATCH[1]}"
+    printf '%s' "${target//\\/\\\\}"
+  else
+    return 1
+  fi
+}
+
+# Sets a launcher's Exec value to $2. Returns 1, touching nothing, when it is
+# already that, so a re-run leaves files and their timestamps alone.
+lsu_launcher_set_exec() {
+  local launcher_path="$1" value="$2"
+
+  [[ "$(sed -n 's/^Exec=//p' "$launcher_path" | head -n1)" == "$value" ]] && return 1
+
+  sed -i "s|^Exec=.*|Exec=$(lsu_sed_escape "$value")|" "$launcher_path"
+}
+
+# Wine's launcher writer, winemenubuilder, puts a bare "wine" in every launcher
+# it writes, which is whatever is first on PATH and often the system's Wine.
+# Wine runs it whenever a program saves a shortcut, updates and repairs
+# included, so a launcher pointed at the bundled Wine could be undone at any
+# time. lsu_disable_menubuilder switches it off for the prefix and the stamp
+# file below records when that happened; from then on launchers are only
+# written by lsu_generate_launchers, which patches them straight away.
+LSU_LAUNCHER_STAMP_NAME=".lsu-launchers"
+
+lsu_disable_menubuilder() {
+  run "${LSU_BINDIR}/wine" reg add 'HKCU\Software\Wine\DllOverrides' \
+    /v winemenubuilder.exe /t REG_SZ /d '' /f
+  [[ -e "${WINEPREFIX}/${LSU_LAUNCHER_STAMP_NAME}" ]] \
+    || touch "${WINEPREFIX}/${LSU_LAUNCHER_STAMP_NAME}"
+}
+
+# The launcher winemenubuilder writes for shortcut $1, a path in the prefix:
+# Start Menu entries under the applications menu, desktop shortcuts on the
+# desktop. Fails for a shortcut anywhere else, which it ignores too.
+lsu_shortcut_launcher() {
+  local lnk="$1" rel
+
+  case "$lnk" in
+    */"Start Menu"/*.lnk)
+      rel="${lnk#*/Start Menu/}"
+      printf '%s' "$HOME/.local/share/applications/wine/${rel%.lnk}.desktop"
+      ;;
+    */Desktop/*.lnk)
+      rel="${lnk##*/}"
+      printf '%s' "$(xdg_desktop_dir)/${rel%.lnk}.desktop"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Writes launchers for the shortcuts saved since the last run that do not have
+# one yet, as Wine would have. A launcher that already exists is left as it is,
+# patches and all, and one the user deleted only comes back if its program
+# saves the shortcut again. Nothing happens in a prefix that still runs
+# winemenubuilder itself. Returns 0 when it wrote any, listed in
+# LSU_NEW_LAUNCHERS.
+lsu_generate_launchers() {
+  local stamp="${WINEPREFIX}/${LSU_LAUNCHER_STAMP_NAME}"
+  local lnk launcher written=1 failed=0
+  local roots=()
+
+  LSU_NEW_LAUNCHERS=()
+  [[ -e "$stamp" ]] || return 1
+
+  # Taken now, so a shortcut saved while this runs is picked up next time.
+  touch "${stamp}.next"
+
+  shopt -s nullglob
+  roots=(
+    "${WINEPREFIX}/drive_c/ProgramData/Microsoft/Windows/Start Menu"
+    "${WINEPREFIX}"/drive_c/users/*/AppData/Roaming/Microsoft/Windows/"Start Menu"
+    "${WINEPREFIX}"/drive_c/users/*/Desktop
+  )
+  shopt -u nullglob
+
+  # -H as the user's Desktop is a link to the Linux one.
+  while IFS= read -r -d '' lnk; do
+    launcher="$(lsu_shortcut_launcher "$lnk")" || continue
+    [[ -e "$launcher" ]] && continue
+
+    lnk="${lnk#"${WINEPREFIX}/drive_c/"}"
+    # Not -w, as Wine runs it: with that, a shortcut it finds no icon for
+    # (a document) waits for its parent to exit, and its parent waits for it.
+    if run timeout 60 env WINEDLLOVERRIDES="winemenubuilder.exe=b" \
+      "${LSU_BINDIR}/wine" winemenubuilder.exe "C:\\${lnk//\//\\}"
+    then
+      written=0
+      [[ -e "$launcher" ]] && LSU_NEW_LAUNCHERS+=("$launcher")
+    else
+      echo -e "${YELLOW}Unable to write a launcher for C:\\${lnk//\//\\}, see ${LSU_LOGDIR}/install.log${NC}"
+      failed=1
+    fi
+  done < <(find -H "${roots[@]}" -name '*.lnk' -newer "$stamp" -print0 2> /dev/null)
+
+  # Left as it was after a failure, so that shortcut is tried again next time.
+  if (( failed )); then
+    rm -f "${stamp}.next"
+  else
+    mv -f "${stamp}.next" "$stamp"
+  fi
+  return "$written"
+}
+
+# Points launcher $1 at the bundled Wine through the launch wrapper, so the app
+# runs under winehub. Wine writes Exec lines of the form:
+#   Exec=env "WINEPREFIX=<prefix>" wine "C:\\Program Files\\App\\App.exe"
+# and the line is rebuilt around the Windows path. A line with no path that
+# can be read still gets its bare wine pointed at the bundled one. Returns 0
+# when it changed anything.
+lsu_patch_launcher() {
+  local launcher_path="$1" exec target padded changed=1
+
+  if grep -q '^X-LSU-Module=' "$launcher_path"; then
+    sed -i '/^X-LSU-Module=/d' "$launcher_path"
+    changed=0
+  fi
+
+  exec="$(sed -n 's/^Exec=//p' "$launcher_path" | head -n1)"
+
+  if target="$(lsu_launcher_target "$exec")"; then
+    lsu_launcher_set_exec "$launcher_path" "${LSU_BINDIR}/lsu-launch-wrapper \"${target}\"" \
+      && changed=0
+    return "$changed"
+  fi
+
+  padded=" ${exec} "
+  if [[ "$padded" == *" wine "* ]]; then
+    padded="${padded// wine / \"${LSU_BINDIR}/wine\" }"
+    padded="${padded# }"
+    lsu_launcher_set_exec "$launcher_path" "${padded% }" || return "$changed"
+    echo -e "${YELLOW}${launcher_path} does not start a Windows path this script can read, so it was pointed at the bundled Wine without winehub.${NC}"
+    return 0
+  fi
+
+  if [[ "$exec" != *"${LSU_BINDIR}/"* ]]; then
+    echo -e "${YELLOW}Unable to read what ${launcher_path} starts, leaving it as it is.${NC}"
+  fi
+  return "$changed"
+}
+
+# Every launcher for this prefix through lsu_patch_launcher. Returns 0 when it
+# changed any.
+lsu_patch_launchers() {
+  local root launcher_path changed=1
+
+  shopt -s globstar nullglob
+
+  while read -r root; do
+    [[ -d "$root" ]] || continue
+
+    for launcher_path in "$root"/**/*.desktop; do
+      if is_lsu_launcher "$launcher_path"; then
+        lsu_patch_launcher "$launcher_path" && changed=0
+      fi
+    done
+  done < <(lsu_launcher_roots)
+
+  shopt -u globstar nullglob
+
+  return "$changed"
+}
+
+# Writes launchers for new shortcuts and points them all at the bundled Wine,
+# or with --new only the ones it wrote. Every install patches the launchers
+# of any other one it finds, as it would after being moved, which only
+# install.sh should do.
+lsu_update_launchers() {
+  local changed=0 launcher
+
+  lsu_generate_launchers && changed=1
+  if [[ "${1:-}" == "--new" ]]; then
+    for launcher in "${LSU_NEW_LAUNCHERS[@]}"; do
+      lsu_patch_launcher "$launcher" || true
+    done
+  elif lsu_patch_launchers; then
+    changed=1
+  fi
+  if (( changed )); then
+    lsu_refresh_desktop_database
+  fi
+  return 0
 }
 
 lsu_refresh_desktop_database() {
@@ -466,7 +741,7 @@ lsu_module_init() {
   if [[ -z "${LSU_RESULT_FILE:-}" ]]; then
     LSU_STANDALONE=1
     LSU_RESULT_FILE=/dev/stdout
-    LSU_TARGET_DIR="${TARGET_DIR:-$(cd -- "$(dirname -- "$LSU_LIB")/.." && pwd)}"
+    LSU_TARGET_DIR="$(realpath -ms -- "${TARGET_DIR:-$(dirname -- "$LSU_LIB")/..}")"
     LSU_BINDIR="${LSU_TARGET_DIR}/bin"
     LSU_VARDIR="${LSU_TARGET_DIR}/var"
     LSU_LOGDIR="${LSU_TARGET_DIR}/log"
@@ -601,5 +876,11 @@ lsu_module_dispatch() {
   fi
 
   "module_${verb}"
+
+  # install.sh does this once all the modules have run.
+  if [[ "$verb" == "install" ]] && [[ "$LSU_STANDALONE" == "1" ]]; then
+    lsu_update_launchers
+  fi
+
   exit $LSU_EXIT_OK
 }
