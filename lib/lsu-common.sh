@@ -180,14 +180,12 @@ lsu_cleanup_runtime() {
 # script the read yields nothing, so it looks for the wine64 that wine 11 no
 # longer has, ends up with an empty WINE_ARCH and dies on "cmd.exe /c echo
 # '%AppData%' returned empty string". WINE64 is checked before any of that.
+#
+# It has to be the bundled Wine. Fedora's wine package puts the system Wine
+# at /usr/bin/wine64, and winetricks run that against the prefix fails the
+# same way, so neither PATH nor an inherited WINE64 gets a say.
 pin_winetricks_wine_arch() {
-  [[ -n "${WINE64:-}" ]] && return
-
-  if command -v wine64 > /dev/null 2>&1; then
-    export WINE64="$(command -v wine64)"
-  else
-    export WINE64="$SILENT_WINE"
-  fi
+  export WINE64="$SILENT_WINE"
 }
 
 # Runs a winetricks verb unless $2 (a path, globs allowed) already exists.
