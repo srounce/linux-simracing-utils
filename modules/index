@@ -1,0 +1,8 @@
+# id	name	description
+#
+# The modules install.sh offers, in menu order. Tab separated. Each id has a
+# modules/<id>.sh; see modules/example.sh for how to write one.
+simhub	SimHub	Dashboards, overlays, bass shakers and motion
+crewchief	CrewChief	Spotter and virtual race engineer
+pithouse	MOZA Pit House	Settings and firmware for MOZA wheelbases, wheels and pedals
+rsf	Richard Burns Rally RSF	The RallySimFans build of Richard Burns Rally

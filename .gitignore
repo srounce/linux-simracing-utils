@@ -2,3 +2,4 @@ pfx/
 bin/
 log/
 var/
+modules/local/

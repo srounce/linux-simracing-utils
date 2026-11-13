@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 
 : "${LSU_BRANCH:="master"}"
-: "${LSU_WINE_REPO:="srounce/wine"}"
-: "${LSU_WINE_VERSION:="latest"}"
+: "${LSU_REPO:="srounce/linux-simracing-utils"}"
+
+# Installers from before var/lsu.conf kept the Wine settings baked in here, and
+# an update run by one of them still bakes them in. load_settings moves them
+# into var/lsu.conf and empties these lines again.
+: "${LSU_WINE_REPO:=""}"
+: "${LSU_WINE_VERSION:=""}"
 
 # Run from a pipe (curl ... | bash) there is no script file to work from and
 # stdin is the script itself, so fetch a copy, point stdin back at the
@@ -11,16 +16,16 @@
 if [[ ! -f "${BASH_SOURCE[0]:-}" ]]; then
   bootstrap_dir=$(mktemp -d)
   if ! curl -sL --fail \
-    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/${LSU_BRANCH}/install.sh" \
+    "https://raw.githubusercontent.com/${LSU_REPO}/${LSU_BRANCH}/install.sh" \
     -o "${bootstrap_dir}/install.sh"
   then
     echo "Unable to download the installer from branch ${LSU_BRANCH}." >&2
     exit 1
   fi
   { exec < /dev/tty; } 2> /dev/null || true
-  exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" \
+  exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" LSU_REPO="$LSU_REPO" \
     TARGET_DIR="${TARGET_DIR:-$HOME/linux-simracing-utils}" \
-    bash "${bootstrap_dir}/install.sh"
+    bash "${bootstrap_dir}/install.sh" "$@"
 fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
@@ -28,30 +33,85 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 : "${DEBUG:="0"}"
 : "${UNATTENDED:="0"}"
 : "${TARGET_DIR:="$SCRIPT_DIR"}"
+# Every path in the prefix's launchers is built from this, and they are told
+# apart from other prefixes' by plain text matching, so a trailing slash or a
+# relative path must not change it. Symlinks are kept as given.
+TARGET_DIR="$(realpath -ms -- "$TARGET_DIR")"
+
+LSU_ARGS=("$@")
 
 set -euo pipefail
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m' # No Color
+usage() {
+  cat << EOF
+usage: install.sh [--modules <id>[,<id>...] | --modules none]
+
+Installs or updates Wine, the Wine prefix and Winecarte, then the programs
+(modules) you pick from a menu.
+
+  --modules <ids>   install or update these modules instead of asking,
+                    e.g. --modules simhub,crewchief
+  --modules none    only the base install, no modules
+
+With UNATTENDED=1 and no --modules, the modules already installed are updated.
+See README.md for the environment variables that pin versions and channels.
+EOF
+}
+
+MODULES_ARG=""
+MODULES_ARG_SET=0
+
+while (( $# )); do
+  case "$1" in
+    --modules)
+      if (( $# < 2 )); then
+        usage >&2
+        exit 2
+      fi
+      MODULES_ARG="$2"
+      MODULES_ARG_SET=1
+      shift 2
+      ;;
+    --modules=*)
+      MODULES_ARG="${1#*=}"
+      MODULES_ARG_SET=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+LSU_RAW_URL="https://raw.githubusercontent.com/${LSU_REPO}/${LSU_BRANCH}"
+
+# Everything below needs the shared library. A copy that has none yet, from a
+# bootstrap or from before the library existed, fetches it.
+if [[ ! -f "${SCRIPT_DIR}/lib/lsu-common.sh" ]]; then
+  mkdir -p "${SCRIPT_DIR}/lib"
+  if ! curl -sL --fail "${LSU_RAW_URL}/lib/lsu-common.sh" \
+    -o "${SCRIPT_DIR}/lib/lsu-common.sh.part"
+  then
+    rm -f "${SCRIPT_DIR}/lib/lsu-common.sh.part"
+    echo "Unable to download lib/lsu-common.sh from branch ${LSU_BRANCH}." >&2
+    exit 1
+  fi
+  mv -f "${SCRIPT_DIR}/lib/lsu-common.sh.part" "${SCRIPT_DIR}/lib/lsu-common.sh"
+fi
+
+# shellcheck source=lib/lsu-common.sh
+source "${SCRIPT_DIR}/lib/lsu-common.sh"
 
 LSU_LOGDIR="${TARGET_DIR}/log"
-mkdir -p ${LSU_LOGDIR}
+mkdir -p "${LSU_LOGDIR}"
 echo "" > "${LSU_LOGDIR}/prefix_setup.log"
 echo "" > "${LSU_LOGDIR}/install.log"
-
-run() {
-  {
-    echo "---"
-    printf '%q ' "$@"
-    echo
-    "$@"
-  } >> "${LSU_LOGDIR}/install.log" 2>&1
-}
 
 if [[ $DEBUG == "1" ]]; then
   set -x
@@ -60,81 +120,7 @@ else
   export WINEDEBUG=${WINEDEBUG:--all}
 fi
 
-# $2 is the answer a bare Enter gives, and picks which letter the hint
-# capitalises. Returns 0 for yes.
-confirm() {
-  local message="$1"
-  local default="${2:-Y}"
-  local hint="[Y/n]"
-  local reply
-
-  [[ "$default" == "N" ]] && hint="[y/N]"
-
-  while true; do
-    printf "${CYAN}"
-    read -rp "${message} ${hint} " reply
-    printf "${NC}"
-    reply="${reply:-$default}"
-    case "$reply" in
-      [Yy]) return 0 ;;
-      [Nn]) return 1 ;;
-      *) echo "Please enter y or n." ;;
-    esac
-  done
-}
-
-# Upstream version lookups. Each echoes an empty string when the release data
-# cannot be fetched, which callers treat as "version unknown" rather than fatal.
-github_latest_tag() {
-  curl -sL --fail "https://api.github.com/repos/$1/releases/latest" 2> /dev/null \
-    | grep -m1 '"tag_name"' \
-    | cut -d '"' -f 4 \
-    || true
-}
-
-# Unlike /releases/latest this includes prereleases, since /releases is ordered
-# newest-first regardless of the prerelease flag.
-github_newest_tag() {
-  curl -sL --fail "https://api.github.com/repos/$1/releases" 2> /dev/null \
-    | grep -m1 '"tag_name"' \
-    | cut -d '"' -f 4 \
-    || true
-}
-
-gitlab_latest_tag() {
-  curl -sL --fail "https://gitlab.com/api/v4/projects/$1/repository/tags?per_page=1" 2> /dev/null \
-    | grep -m1 '"name"' \
-    | cut -d '"' -f 4 \
-    || true
-}
-
-github_release_asset_url() {
-  curl -sL --fail "https://api.github.com/repos/$1/releases/tags/$2" 2> /dev/null \
-    | grep -m1 "browser_download_url" \
-    | cut -d '"' -f 4 \
-    || true
-}
-
-# Picks the wording and the safe default from what is installed against what is
-# available upstream. An unknown upstream version degrades to repair wording
-# rather than claiming the install is current.
-confirm_component() {
-  local name="$1" installed="$2" target="$3"
-
-  if [[ -z "$installed" ]]; then
-    echo -e "${CYAN}${name} is not installed.${NC}"
-    confirm "Install ${name}?" Y
-  elif [[ -z "$target" ]]; then
-    echo -e "${CYAN}${name} ${installed} is installed.${NC}"
-    confirm "Reinstall/repair ${name}?" N
-  elif [[ "$installed" == "$target" ]]; then
-    echo -e "${CYAN}${name} ${installed} is installed and up to date.${NC}"
-    confirm "Reinstall/repair ${name}?" N
-  else
-    echo -e "${CYAN}${name} ${installed} is installed, ${target} is available.${NC}"
-    confirm "Update ${name}?" Y
-  fi
-}
+lsu_init_runtime
 
 bake_default() {
   local name="$1" value="$2" file="$3"
@@ -143,41 +129,57 @@ bake_default() {
   sed -i "s|^: \"\${${name}:=\"[^\"]*\"}\"\$|: \"\${${name}:=\"${value}\"}\"|" "$file"
 }
 
-# Standalone installers keep their branch and Wine pin as baked defaults. Git
+# Standalone installers keep where they update from as baked defaults. Git
 # clones are skipped, since a modified file blocks pull.
 bake_defaults() {
   bake_default LSU_BRANCH "$LSU_BRANCH" "$1"
-  bake_default LSU_WINE_REPO "$LSU_WINE_REPO" "$1"
-  bake_default LSU_WINE_VERSION "$LSU_WINE_VERSION" "$1"
+  bake_default LSU_REPO "$LSU_REPO" "$1"
 }
 
+# Any clone counts, forks included, but only at its top level and only while
+# it tracks install.sh, so an install directory that happens to sit inside an
+# unrelated repository (a dotfiles home, say) is not mistaken for one.
 is_lsu_clone() {
-  [[ "$(git -C "$1" remote get-url origin 2> /dev/null)" == *srounce/linux-simracing-utils* ]]
+  [[ "$(git -C "$1" rev-parse --show-toplevel 2> /dev/null)" -ef "$1" ]] \
+    && git -C "$1" ls-files --error-unmatch install.sh > /dev/null 2>&1
 }
 
+restart_installer() {
+  lsu_cleanup_runtime
+  exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" LSU_REPO="$LSU_REPO" \
+    DEBUG="$DEBUG" UNATTENDED="$UNATTENDED" TARGET_DIR="$TARGET_DIR" \
+    bash "$1" "${LSU_ARGS[@]}"
+}
+
+INSTALLER_OUTDATED=0
+
+# install.sh and the library it sources update together, so a run never
+# mixes one version of each.
 check_self_update() {
   if [[ "${LSU_SKIP_UPDATE:-0}" == "1" ]]; then
     return
   fi
 
   local script_path="${SCRIPT_DIR}/${BASH_SOURCE[0]##*/}"
-  local remote_script=$(mktemp)
+  local lib_path="${SCRIPT_DIR}/lib/lsu-common.sh"
+  local remote_dir="${LSU_TMP}/self-update"
 
-  if ! curl -sL --fail \
-    "https://raw.githubusercontent.com/srounce/linux-simracing-utils/${LSU_BRANCH}/install.sh" \
-    -o "$remote_script"
+  mkdir -p "$remote_dir"
+
+  if ! curl -sL --fail "${LSU_RAW_URL}/install.sh" -o "${remote_dir}/install.sh" \
+    || ! curl -sL --fail "${LSU_RAW_URL}/lib/lsu-common.sh" -o "${remote_dir}/lsu-common.sh"
   then
     echo -e "${YELLOW}Unable to check for installer updates, continuing with the current version.${NC}"
-    rm -f "$remote_script"
     return
   fi
 
   if ! is_lsu_clone "$SCRIPT_DIR"; then
-    bake_defaults "$remote_script"
+    bake_defaults "${remote_dir}/install.sh"
   fi
 
-  if cmp -s "$script_path" "$remote_script"; then
-    rm -f "$remote_script"
+  if cmp -s "$script_path" "${remote_dir}/install.sh" \
+    && cmp -s "$lib_path" "${remote_dir}/lsu-common.sh"
+  then
     return
   fi
 
@@ -188,23 +190,80 @@ check_self_update() {
       echo -e "${CYAN}Updating installer repository...${NC}"
       if ! run git -C "$SCRIPT_DIR" pull --ff-only origin "$LSU_BRANCH"; then
         echo -e "${YELLOW}Failed to update the installer repository (see ${LSU_LOGDIR}/install.log), continuing with the current version.${NC}"
-        rm -f "$remote_script"
         return
       fi
     else
       echo -e "${CYAN}Updating installer...${NC}"
-      cp "$remote_script" "$script_path"
+      cp "${remote_dir}/install.sh" "$script_path"
       chmod +x "$script_path"
+      cp "${remote_dir}/lsu-common.sh" "$lib_path"
     fi
-    rm -f "$remote_script"
     echo -e "${GREEN}Installer updated, restarting...${NC}"
-    exec env LSU_SKIP_UPDATE=1 LSU_BRANCH="$LSU_BRANCH" \
-      DEBUG="$DEBUG" UNATTENDED="$UNATTENDED" TARGET_DIR="$TARGET_DIR" \
-      bash "$script_path"
+    restart_installer "$script_path"
   fi
 
   echo -e "${YELLOW}Skipping installer update.${NC}"
-  rm -f "$remote_script"
+  INSTALLER_OUTDATED=1
+}
+
+# Settings that outlive a run, kept in var/lsu.conf as KEY=value lines. It is
+# read line by line rather than sourced, so it can never run anything.
+conf_get() {
+  [[ -f "$LSU_CONF" ]] || return 0
+  sed -n "s/^$1=//p" "$LSU_CONF" | tail -n1
+}
+
+conf_set() {
+  mkdir -p "$(dirname "$LSU_CONF")"
+  if [[ -f "$LSU_CONF" ]]; then
+    grep -v "^$1=" "$LSU_CONF" > "${LSU_CONF}.tmp" || true
+  else
+    : > "${LSU_CONF}.tmp"
+  fi
+  echo "$1=$2" >> "${LSU_CONF}.tmp"
+  mv -f "${LSU_CONF}.tmp" "$LSU_CONF"
+}
+
+# KEY=default for each setting kept in var/lsu.conf.
+LSU_SETTINGS=(
+  LSU_WINE_REPO=srounce/wine
+  LSU_WINE_VERSION=latest
+  LSU_WINE_CHANNEL=prerelease
+)
+
+WINE_CHANNEL_EXPLICIT=0
+
+# A setting given for this run, in the environment or baked in by an older
+# installer, wins and is saved for later runs. Anything else comes from
+# var/lsu.conf, then the default.
+load_settings() {
+  local setting key value
+
+  LSU_CONF="${vardir}/lsu.conf"
+
+  for setting in "${LSU_SETTINGS[@]}"; do
+    key="${setting%%=*}"
+    if [[ -n "${!key:-}" ]]; then
+      conf_set "$key" "${!key}"
+      [[ "$key" == "LSU_WINE_CHANNEL" ]] && WINE_CHANNEL_EXPLICIT=1
+    else
+      value="$(conf_get "$key")"
+      printf -v "$key" '%s' "${value:-${setting#*=}}"
+    fi
+  done
+
+  case "$LSU_WINE_CHANNEL" in
+    release|prerelease) ;;
+    *)
+      echo -e "${RED}LSU_WINE_CHANNEL must be release or prerelease (found: ${LSU_WINE_CHANNEL}).${NC}"
+      exit 1
+      ;;
+  esac
+
+  if ! is_lsu_clone "$TARGET_DIR"; then
+    bake_default LSU_WINE_REPO "" "${TARGET_DIR}/install.sh"
+    bake_default LSU_WINE_VERSION "" "${TARGET_DIR}/install.sh"
+  fi
 }
 
 # Stops a pin naming no release from being baked in. Offline runs still pass.
@@ -223,11 +282,10 @@ check_wine_pin() {
   fi
 }
 
-check_wine_pin
 check_self_update
 
 if [[ "$UNATTENDED" == "1" ]]; then
-  printf "${CYAN}Install directory:${NC} ${TARGET_DIR}"
+  printf "${CYAN}Install directory:${NC} %s\n" "${TARGET_DIR}"
 else
   printf "${CYAN}Install directory: ${NC}"
   read -e -rp "" -i "$TARGET_DIR" TARGET_DIR
@@ -236,9 +294,18 @@ fi
 WINEPREFIX="${TARGET_DIR}/pfx"
 export WINEPREFIX
 
+# Logging starts before the install directory is known, so move what has been
+# written so far to the chosen directory and log there from now on.
+mkdir -p "${TARGET_DIR}/log"
+if [[ ! "${TARGET_DIR}/log" -ef "$LSU_LOGDIR" ]]; then
+  mv -f "${LSU_LOGDIR}/install.log" "${LSU_LOGDIR}/prefix_setup.log" "${TARGET_DIR}/log/"
+  LSU_LOGDIR="${TARGET_DIR}/log"
+fi
+
 if [[ "$TARGET_DIR" != "$SCRIPT_DIR" ]]; then
-  mkdir -p "${TARGET_DIR}"
+  mkdir -p "${TARGET_DIR}/lib"
   cp "${SCRIPT_DIR}/install.sh" "${TARGET_DIR}/install.sh"
+  cp "${SCRIPT_DIR}/lib/lsu-common.sh" "${TARGET_DIR}/lib/lsu-common.sh"
   bake_defaults "${TARGET_DIR}/install.sh"
   chmod +x "${TARGET_DIR}/install.sh"
   echo -e "${GREEN}Installer copied to ${TARGET_DIR}/install.sh${NC}"
@@ -247,73 +314,49 @@ fi
 bindir="${TARGET_DIR}/bin"
 vardir="${TARGET_DIR}/var"
 mkdir -p "${bindir}" "${vardir}"
+# The names the library uses for them.
+LSU_TARGET_DIR="$TARGET_DIR"
+LSU_BINDIR="$bindir"
+LSU_VARDIR="$vardir"
 
 export PATH="${bindir}:$PATH"
 
-setup_silentwine() {
-  export SILENT_WINE=$(mktemp)
-  cat > $SILENT_WINE << EOF
-#!/usr/bin/env bash
-export WINEDEBUG=${WINEDEBUG:--all}
-exec wine "\$@"
-EOF
-  chmod +x $SILENT_WINE
-}
+load_settings
+check_wine_pin
 
-setup_silentwine
+# Oldest winetricks verified against the sangria Wine builds.
+MIN_WINETRICKS_VERSION=20260125
 
-DOTNET_INDEX_DIR=$(mktemp -d)
-
-# A trapped signal has to exit itself, which then runs the EXIT trap.
-trap 'exit 130' SIGINT
-trap 'exit 143' SIGTERM
-trap cleanup_tools EXIT
-
-cleanup_tools() {
-  rm -f "$SILENT_WINE"
-  rm -rf "${DOTNET_INDEX_DIR}"
-}
-
+# Everything runs on the bundled Wine. A system Wine further down PATH would
+# upgrade the prefix behind its back, so it is not accepted as a stand-in.
 check_tools() {
-  if ! run command -v wine; then
-    echo -e "${RED}Wine is not available. Re-run this script and accept the Wine install step to proceed.${NC}"
+  if [[ "$(command -v wine)" != "${bindir}/wine" ]]; then
+    echo -e "${RED}The bundled Wine is missing from ${bindir}, re-run this script to install it.${NC}"
     exit 1
   fi
 
   local wine_version=$(wine --version 2> /dev/null)
   local wine_major=$(echo "$wine_version" | grep -oE '[0-9]+' | head -1)
   if [[ -z "$wine_major" ]] || (( wine_major < 11 )); then
-    echo -e "${RED}Wine 11 or newer is required (found: ${wine_version:-unknown}). Re-run this script and accept the Wine install step to proceed.${NC}"
+    echo -e "${RED}Wine 11 or newer is required (found: ${wine_version:-unknown}). Re-run this script to reinstall the bundled Wine.${NC}"
     exit 1
   fi
 
   if ! run command -v winetricks; then
     echo -e "${RED}Winetricks is not installed, please install it with your package manager and re-run this script to proceed.${NC}"
     exit 1
-  else
-    if ! winetricks --version 2> /dev/null | run grep -E '^(2026|2025)'; then
-      winetricks_version=$(winetricks --version 2> /dev/null | grep -Eo '^[0-9]+')
-      echo -e "${RED}Winetricks version is out of date, please update it and re-run this script to proceed.${NC}"
-      exit 1
-    fi
+  fi
+
+  # Releases are tagged YYYYMMDD, and git builds append "-next".
+  local winetricks_version
+  winetricks_version=$(winetricks --version 2> /dev/null | grep -Eo '^[0-9]{8}' || true)
+  run echo "winetricks version: ${winetricks_version:-unknown}"
+  if [[ -z "$winetricks_version" ]] || (( winetricks_version < MIN_WINETRICKS_VERSION )); then
+    echo -e "${RED}Winetricks ${MIN_WINETRICKS_VERSION} or newer is required (found: ${winetricks_version:-unknown} at $(command -v winetricks)). Update it with your package manager or run 'winetricks --self-update', then re-run this script to proceed.${NC}"
+    exit 1
   fi
 
   pin_winetricks_wine_arch
-}
-
-# Winetricks decides a 64-bit prefix is in new-wow64 mode by comparing the ELF
-# class of the wine and wineserver binaries. Where wine ships as a wrapper
-# script the read yields nothing, so it looks for the wine64 that wine 11 no
-# longer has, ends up with an empty WINE_ARCH and dies on "cmd.exe /c echo
-# '%AppData%' returned empty string". WINE64 is checked before any of that.
-pin_winetricks_wine_arch() {
-  [[ -n "${WINE64:-}" ]] && return
-
-  if command -v wine64 > /dev/null 2>&1; then
-    export WINE64="$(command -v wine64)"
-  else
-    export WINE64="$SILENT_WINE"
-  fi
 }
 
 install_winetricks() {
@@ -338,7 +381,10 @@ setup_prefix() {
 
   mkdir -p $WINEPREFIX
 
-  WINEDLLOVERRIDES="mscoree,mshtml=" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  # winemenubuilder as lsu_disable_menubuilder explains, until it has run.
+  WINEDLLOVERRIDES="mscoree,mshtml=;winemenubuilder.exe=d" wine wineboot.exe --init >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  # wineboot returns before the wineserver has written the registry to disk.
+  wineserver -w
 
   echo -e "${GREEN}Prefix successfully created at $WINEPREFIX${NC}"
 }
@@ -352,160 +398,23 @@ set_registry_entries() {
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "Map Controllers"  /t REG_DWORD /d 0 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
   wine reg add 'HKLM\System\CurrentControlSet\Services\winebus' /v "DisableInput"     /t REG_DWORD /d 1 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
 
-  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f
-  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f
+  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdate" /v Start /t REG_DWORD /d 4 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add "HKLM\SYSTEM\CurrentControlSet\Services\edgeupdatem" /v Start /t REG_DWORD /d 4 /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+
+  # Some distributions export where the Linux .Net lives for every session
+  # (Arch's dotnet packages do). Wine passes that on, and Windows .Net then
+  # looks for its runtime there and asks for .Net to be installed. Values set
+  # here win over the Linux ones; they are where .Net installs itself anyway.
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT     /t REG_SZ /d 'C:\Program Files\dotnet'       /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT_X64 /t REG_SZ /d 'C:\Program Files\dotnet'       /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+  wine reg add 'HKCU\Environment' /v DOTNET_ROOT_X86 /t REG_SZ /d 'C:\Program Files (x86)\dotnet' /f >> "${LSU_LOGDIR}/prefix_setup.log" 2>&1
+
+  lsu_disable_menubuilder
+
+  # Flush the registry to disk before winetricks reads the prefix.
+  wineserver -w
 
   echo -e "${CYAN}Registry entries updated successfully${NC}"
-}
-
-check_dotnet() {
-  echo -e "${CYAN}Checking for existing .Net 4.8 install...${NC}"
-
-  DOTNET_DIR="$WINEPREFIX/drive_c/windows/Microsoft.NET/Framework/v4.0.30319"
-
-  if [[ ! -d "$DOTNET_DIR" ]] || \
-    [[ ! -f "$DOTNET_DIR/mscorlib.dll" ]] || \
-    [[ $(stat -c%s "$DOTNET_DIR/mscorlib.dll" 2> /dev/null) -lt 1000000 ]]
-  then
-    echo -e "${CYAN}Installing .Net 4.8...${NC}"
-    if ! WINE=$SILENT_WINE winetricks -q dotnet48 > "${LSU_LOGDIR}/dotnet_install.log" 2>&1; then
-      echo -e "${RED}Installation failed for .Net 4.8:"
-      tail -n 50 "${LSU_LOGDIR}/dotnet_install.log"
-      echo -e "Full log: ${LSU_LOGDIR}/dotnet_install.log${NC}"
-      exit 1
-    else
-      echo -e "${GREEN}Successfully installed .Net 4.8${NC}"
-    fi
-  else
-    echo -e "${GREEN}Found existing .Net 4.8 install.${NC}"
-  fi
-}
-
-# Every dotnet runtime verb drops the same dotnet.exe, so only the shared
-# framework directory and its version tell them apart. On a 64-bit prefix
-# winetricks installs the x86 build alongside, under Program Files (x86);
-# either build landing in Program Files is enough to call the verb done.
-check_dotnet_runtime() {
-  local verb="$1" framework="$2" version="$3" label="$4"
-
-  if compgen -G "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/${version}.*" > /dev/null; then
-    echo -e "${GREEN}Found existing ${label} install.${NC}"
-    return
-  fi
-
-  echo -e "${CYAN}Installing ${label}...${NC}"
-  if ! WINE=$SILENT_WINE winetricks -q "${verb}" > "${LSU_LOGDIR}/${verb}_install.log" 2>&1; then
-    echo -e "${RED}Installation failed for ${label}:"
-    tail -n 50 "${LSU_LOGDIR}/${verb}_install.log"
-    echo -e "Full log: ${LSU_LOGDIR}/${verb}_install.log${NC}"
-    exit 1
-  fi
-  echo -e "${GREEN}Successfully installed ${label}${NC}"
-}
-
-# Winetricks pins old patches and has no aspnetcore verb. Apps that ask for an
-# exact patch only roll forward onto newer ones, so these runtimes come from
-# Microsoft's release index instead.
-dotnet_index() {
-  local channel="$1"
-  local index="${DOTNET_INDEX_DIR}/${channel}.json"
-
-  if [[ ! -f "$index" ]] && ! curl -sL --fail \
-    "https://builds.dotnet.microsoft.com/dotnet/release-metadata/${channel}/releases.json" \
-    -o "$index"
-  then
-    echo -e "${RED}Unable to fetch the .Net ${channel} release index.${NC}" >&2
-    return 1
-  fi
-
-  echo "$index"
-}
-
-# Releases are listed newest first, so the first match is the current one.
-dotnet_installer_url() {
-  local channel="$1" bundle="$2" arch="$3" index
-
-  index="$(dotnet_index "$channel")" || exit 1
-
-  grep -m1 -o "https://[^\"]*/${bundle}-[0-9.]*-win-${arch}\.exe" "$index" || true
-}
-
-dotnet_installer_version() {
-  local installer="${1##*/}" bundle="$2"
-
-  installer="${installer#"${bundle}"-}"
-  echo "${installer%-win-*}"
-}
-
-# Matches the exact patch, not the series, so old patches get updated.
-check_dotnet_bundle() {
-  local channel="$1" bundle="$2" framework="$3" label="$4"
-  local logfile="${LSU_LOGDIR}/${bundle}-${channel}_install.log"
-  local version workdir arch installer url
-
-  url="$(dotnet_installer_url "$channel" "$bundle" x64)"
-
-  if [[ -z "$url" ]]; then
-    echo -e "${RED}No ${label} installer listed in the .Net ${channel} release index.${NC}"
-    exit 1
-  fi
-
-  version="$(dotnet_installer_version "$url" "$bundle")"
-
-  if [[ -d "${WINEPREFIX}/drive_c/Program Files/dotnet/shared/${framework}/${version}" ]]; then
-    echo -e "${GREEN}Found existing ${label} ${version} install.${NC}"
-    return
-  fi
-
-  workdir=$(mktemp -d)
-
-  echo -e "${CYAN}Installing ${label} ${version}...${NC}"
-  echo "" > "$logfile"
-
-  # x86 first so the x64 build lands last, like the winetricks verbs.
-  for arch in x86 x64; do
-    url="$(dotnet_installer_url "$channel" "$bundle" "$arch")"
-    installer="${url##*/}"
-
-    if [[ -z "$url" ]]; then
-      echo -e "${RED}No ${label} (${arch}) installer listed in the .Net ${channel} release index.${NC}"
-      rm -rf "$workdir"
-      exit 1
-    fi
-
-    if ! curl -sL --fail -o "${workdir}/${installer}" "$url"; then
-      echo -e "${RED}Failed to download ${label} (${arch}) from ${url}${NC}"
-      rm -rf "$workdir"
-      exit 1
-    fi
-
-    if ! wine "${workdir}/${installer}" /quiet >> "$logfile" 2>&1; then
-      echo -e "${RED}Installation failed for ${label} (${arch}):"
-      tail -n 50 "$logfile"
-      echo -e "Full log: ${logfile}${NC}"
-      rm -rf "$workdir"
-      exit 1
-    fi
-  done
-
-  rm -rf "$workdir"
-  echo -e "${GREEN}Successfully installed ${label} ${version}${NC}"
-}
-
-check_corefonts() {
-  if [[ -f "${WINEPREFIX}/drive_c/windows/Fonts/corefonts.installed" ]]; then
-    echo -e "${GREEN}Found existing corefonts install.${NC}"
-    return
-  fi
-
-  echo -e "${CYAN}Updating prefix corefonts installation...${NC}"
-  if ! WINE=$SILENT_WINE winetricks -q corefonts > "${LSU_LOGDIR}/corefonts_install.log" 2>&1; then
-    echo -e "${RED}Installation failed for corefonts:"
-    tail -n 50 "${LSU_LOGDIR}/corefonts_install.log"
-    echo -e "Full log: ${LSU_LOGDIR}/corefonts_install.log${NC}"
-    exit 1
-  fi
-  echo -e "${GREEN}Installation of corefonts is up to date.${NC}"
 }
 
 check_prefix() {
@@ -514,156 +423,8 @@ check_prefix() {
   fi
 
   set_registry_entries
-  
-  check_dotnet
 
-  check_dotnet_runtime dotnetcore3 Microsoft.NETCore.App 3.1 ".Net Core Runtime 3.1"
-
-  check_dotnet_runtime dotnetcoredesktop3 Microsoft.WindowsDesktop.App 3.1 ".Net Core Desktop Runtime 3.1"
-
-  check_dotnet_bundle 8.0 dotnet-runtime Microsoft.NETCore.App ".Net Runtime 8.0"
-
-  check_dotnet_bundle 8.0 windowsdesktop-runtime Microsoft.WindowsDesktop.App ".Net Desktop Runtime 8.0"
-
-  check_dotnet_bundle 8.0 aspnetcore-runtime Microsoft.AspNetCore.App "ASP.Net Core Runtime 8.0"
-
-  check_corefonts
-}
-
-# SimHub maintains this itself and it is verbatim the upstream release tag, so
-# it stays accurate even for installs this script did not perform. reg query
-# reports CRLF, and the stray carriage return would defeat the version compare.
-simhub_installed_version() {
-  wine reg query 'HKCU\Software\SimHub' /v LastInstalledVersion 2> /dev/null \
-    | tr -d '\r' \
-    | awk '/LastInstalledVersion/ { print $NF }' \
-    || true
-}
-
-check_simhub() {
-  echo -e "${CYAN}Checking for existing SimHub installation...${NC}"
-
-  local installed target
-  installed="$(simhub_installed_version)"
-  target="$(github_latest_tag SHWotever/simhub)"
-
-  if [[ "$UNATTENDED" == "1" ]]; then
-    install_simhub "$installed"
-    return
-  fi
-
-  if confirm_component "SimHub" "$installed" "$target"; then
-    install_simhub "$installed"
-  else
-    echo -e "${YELLOW}Skipping SimHub installation${NC}"
-  fi
-}
-
-install_simhub() {
-  local workdir=$(mktemp -d)
-
-  if [[ -n "$1" ]]; then
-    echo -e "${CYAN}Updating SimHub...${NC}"
-  else
-    echo -e "${CYAN}Installing SimHub...${NC}"
-  fi
-
-  curl -sL --fail "https://api.github.com/repos/SHWotever/simhub/releases/latest" \
-    | grep "browser_download_url" \
-    | cut -d : -f 2,3 \
-    | tr -d \" \
-    | xargs curl -sL --fail > "${workdir}/simhub.zip"
-  unzip -q -d "${workdir}/simhub" "${workdir}/simhub.zip"
-  wine ${workdir}/simhub/SimHubSetup*.exe /TASKS="desktopicon,enablemotion,dashsandoverlays" /RESTARTAPPLICATIONS /VERYSILENT \
-    >> "${LSU_LOGDIR}/simhub_setup.log" 2>&1
-  rm -rf ${workdir}
-
-  if [[ -n "$1" ]]; then
-    echo -e "${GREEN}SimHub successfully updated.${NC}"
-  else
-    echo -e "${GREEN}SimHub successfully installed.${NC}"
-  fi
-}
-
-CREWCHIEF_DIR="drive_c/CrewChiefV4"
-CREWCHIEF_GITLAB_PROJECT="mr_belowski%2FCrewChiefV4"
-
-# The msi is served unversioned, so the tag that was current at install time is
-# recorded alongside the install rather than read back out of it.
-crewchief_installed_version() {
-  local marker="${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
-
-  [[ -f "${WINEPREFIX}/${CREWCHIEF_DIR}/CrewChiefV4.exe" ]] || return 0
-
-  if [[ -f "$marker" ]]; then
-    cat "$marker"
-  else
-    echo "(unknown version)"
-  fi
-}
-
-check_crewchief() {
-  echo -e "${CYAN}Checking for existing CrewChief installation...${NC}"
-
-  local installed target
-  installed="$(crewchief_installed_version)"
-  target="$(gitlab_latest_tag "$CREWCHIEF_GITLAB_PROJECT")"
-
-  if [[ "$UNATTENDED" == "1" ]]; then
-    install_crewchief "$installed" "$target"
-    return
-  fi
-
-  if confirm_component "CrewChief" "$installed" "$target"; then
-    install_crewchief "$installed" "$target"
-  else
-    echo -e "${YELLOW}Skipping CrewChief installation${NC}"
-  fi
-}
-
-install_crewchief() {
-  local workdir=$(mktemp -d)
-
-  if [[ -n "$1" ]]; then
-    echo -e "${CYAN}Updating CrewChief...${NC}"
-  else
-    echo -e "${CYAN}Installing CrewChief...${NC}"
-  fi
-
-  if [[ -f "$SCRIPT_DIR/CrewChiefV4.msi" ]]; then
-    cp "${SCRIPT_DIR}/CrewChiefV4.msi" "${workdir}/CrewChiefV4.msi"
-  fi
-
-  if [[ ! -f "${workdir}/CrewChiefV4.msi" ]]; then
-    curl -sL --fail \
-      -o "${workdir}/CrewChiefV4.msi" \
-      -H 'Referer: https://thecrewchief.org' \
-      "https://thecrewchief.org/downloads/CrewChiefV4.msi"
-  fi
-
-  wine msiexec /i "${workdir}/CrewChiefV4.msi" /qn /l*v "$LSU_LOGDIR/cc_install.log" \
-    INSTALLFOLDER='C:\CrewChiefV4'
-
-  rm -rf ${workdir}
-
-  if [[ ! -f "${WINEPREFIX}/${CREWCHIEF_DIR}/CrewChiefV4.exe" ]]; then
-    echo -e "${RED}Installation failed for CrewChief, see ${LSU_LOGDIR}/cc_install.log${NC}"
-    exit 1
-  fi
-
-  # Without a known tag the marker would keep asserting a version this install
-  # can no longer vouch for.
-  if [[ -n "$2" ]]; then
-    echo "$2" > "${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
-  else
-    rm -f "${WINEPREFIX}/${CREWCHIEF_DIR}/.crewchief-version"
-  fi
-
-  if [[ -n "$1" ]]; then
-    echo -e "${GREEN}CrewChief successfully updated.${NC}"
-  else
-    echo -e "${GREEN}CrewChief successfully installed.${NC}"
-  fi
+  lsu_require_corefonts
 }
 
 WINECARTE_REPO="srounce/winecarte"
@@ -702,16 +463,17 @@ check_winecarte() {
   installed="$(winecarte_installed_version)"
   target="$(winecarte_target_version)"
 
-  if [[ "$UNATTENDED" == "1" ]]; then
-    install_winecarte "$installed" "$target"
+  if [[ -n "$installed" ]] && [[ "$installed" == "$target" ]]; then
+    echo -e "${GREEN}Winecarte ${installed} is installed and up to date.${NC}"
     return
   fi
 
-  if confirm_component "Winecarte" "$installed" "$target"; then
-    install_winecarte "$installed" "$target"
-  else
-    echo -e "${YELLOW}Skipping Winecarte installation${NC}"
+  if [[ -n "$installed" ]] && [[ -z "$target" ]]; then
+    echo -e "${YELLOW}Unable to determine the latest Winecarte release, keeping ${installed}.${NC}"
+    return
   fi
+
+  install_winecarte "$installed" "$target"
 }
 
 install_winecarte() {
@@ -771,33 +533,78 @@ wine_installed_version() {
   fi
 }
 
-# All sangria releases are tagged prerelease, so the newest tag of any kind is
-# the default. LSU_WINE_VERSION pins an exact tag.
+# The newest tag on each channel, looked up once per run. The release channel
+# takes full releases only; the prerelease channel takes the newest tag of any
+# kind, so it moves onto a full release whenever that is the newest.
+WINE_RELEASE_TAG=""
+WINE_PRERELEASE_TAG=""
+WINE_TAGS_LOOKED_UP=0
+
+lookup_wine_tags() {
+  (( WINE_TAGS_LOOKED_UP )) && return
+  WINE_RELEASE_TAG="$(github_latest_tag "$LSU_WINE_REPO")"
+  WINE_PRERELEASE_TAG="$(github_newest_tag "$LSU_WINE_REPO")"
+  WINE_TAGS_LOOKED_UP=1
+}
+
+# LSU_WINE_VERSION pins an exact tag over either channel. Call
+# lookup_wine_tags first; this runs in a subshell and cannot fill the cache.
 wine_target_version() {
   if [[ "$LSU_WINE_VERSION" != "latest" ]]; then
     echo "${LSU_WINE_VERSION}"
+  elif [[ "$LSU_WINE_CHANNEL" == "release" ]]; then
+    echo "$WINE_RELEASE_TAG"
   else
-    github_newest_tag "$LSU_WINE_REPO"
+    echo "$WINE_PRERELEASE_TAG"
   fi
 }
 
+# Asked on every interactive run, with the saved channel as the default, so a
+# plain Enter keeps things as they are. A pin, or a channel given for this
+# run, already answers it.
+choose_wine_channel() {
+  local installed default reply
+
+  if [[ "$UNATTENDED" == "1" ]] || [[ "$WINE_CHANNEL_EXPLICIT" == "1" ]] \
+    || [[ "$LSU_WINE_VERSION" != "latest" ]]
+  then
+    return
+  fi
+
+  lookup_wine_tags
+  installed="$(wine_installed_version)"
+  default=2
+  [[ "$LSU_WINE_CHANNEL" == "release" ]] && default=1
+
+  echo -e "${CYAN}Wine (sangria) channel${installed:+, ${installed} is installed}:${NC}"
+  printf '  1) release      %s\n' "${WINE_RELEASE_TAG:-(unavailable)}"
+  printf '  2) prerelease   %s\n' "${WINE_PRERELEASE_TAG:-(unavailable)}"
+
+  while true; do
+    printf "${CYAN}"
+    read -rp "Choose a channel [${default}] " reply
+    printf "${NC}"
+    case "${reply:-$default}" in
+      1) LSU_WINE_CHANNEL=release; break ;;
+      2) LSU_WINE_CHANNEL=prerelease; break ;;
+      *) echo "Please enter 1 or 2." ;;
+    esac
+  done
+
+  conf_set LSU_WINE_CHANNEL "$LSU_WINE_CHANNEL"
+}
+
+# Everything else runs on this Wine, so it is always installed or updated.
 check_wine() {
   echo -e "${CYAN}Checking for existing Wine installation...${NC}"
 
   local installed target
+
+  [[ "$LSU_WINE_VERSION" == "latest" ]] && lookup_wine_tags
   installed="$(wine_installed_version)"
   target="$(wine_target_version)"
 
-  if [[ "$UNATTENDED" == "1" ]]; then
-    install_wine "$installed" "$target"
-    return
-  fi
-
-  if confirm_component "Wine (sangria)" "$installed" "$target"; then
-    install_wine "$installed" "$target"
-  else
-    echo -e "${YELLOW}Skipping Wine installation${NC}"
-  fi
+  install_wine "$installed" "$target"
 }
 
 # The release is a generic FHS build, so on NixOS it cannot run as-is: the
@@ -927,6 +734,20 @@ install_wine() {
     return
   fi
 
+  # An older Wine on a prefix a newer one has already upgraded can break the
+  # programs in it, so going back takes an explicit yes.
+  if [[ -n "$installed" ]] && [[ -n "$target" ]] \
+    && [[ "$(lsu_wine_cmp "$installed" "$target" || true)" == "gt" ]]
+  then
+    echo -e "${YELLOW}Wine ${installed} is installed, which is newer than ${target}. Going back to an older Wine can break programs in a prefix the newer one has already upgraded.${NC}"
+    if [[ "$UNATTENDED" == "1" ]] || ! confirm "Downgrade Wine to ${target}?" N; then
+      echo -e "${YELLOW}Keeping Wine ${installed}.${NC}"
+      install_wine_bin_entries
+      rm -rf ${workdir}
+      return
+    fi
+  fi
+
   if [[ -n "$installed" ]]; then
     echo -e "${CYAN}Updating Wine...${NC}"
   else
@@ -1022,12 +843,12 @@ cleanup_stale_pids
 # the wrapper still waits so stdout/stderr and the exit status behave as if wine
 # were run directly.
 if [ ! -f "\$WINEHUB_PIDFILE" ] || ! kill -0 "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null; then
-  wine "\$@" &
+  "${bindir}/wine" "\$@" &
   wine_pid=\$!
   "${bindir}/lsu-winehub-manager" &
   wait "\$wine_pid"
 else
-  exec wine "\$@"
+  exec "${bindir}/wine" "\$@"
 fi
 EOF
   chmod +x "${bindir}/lsu-launch-wrapper"
@@ -1045,12 +866,39 @@ export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
 echo \$! > "\$WINEHUB_PIDFILE"
 
 sleep 2
-wineserver -w
+"${bindir}/wineserver" -w
 
 kill "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null
 rm -f "\$WINEHUB_PIDFILE"
+
+# Launchers for any shortcuts the session's programs saved, updates included.
+"${bindir}/lsu-update-launchers" >> "${LSU_LOGDIR}/launchers.log" 2>&1
 EOF
   chmod +x "${bindir}/lsu-winehub-manager"
+
+  cat > "${bindir}/lsu-update-launchers" << EOF
+#!/usr/bin/env bash
+# Writes launchers for the shortcuts programs in the prefix saved since the
+# last run, pointed at the bundled Wine. Run when a wrapped session ends, and
+# safe to run by hand; install.sh does the same on every run.
+
+set -uo pipefail
+
+export WINEPREFIX="${WINEPREFIX}"
+export WINEDEBUG=-all
+export PATH="${bindir}:\$PATH"
+
+LSU_TARGET_DIR="${TARGET_DIR}"
+LSU_BINDIR="${bindir}"
+LSU_VARDIR="${vardir}"
+LSU_LOGDIR="${LSU_LOGDIR}"
+
+source "${TARGET_DIR}/lib/lsu-common.sh"
+
+date
+lsu_update_launchers --new
+EOF
+  chmod +x "${bindir}/lsu-update-launchers"
 }
 
 install_hidraw_device() {
@@ -1238,81 +1086,496 @@ EOF
 fix_desktop_launchers() {
   echo -e "${CYAN}Patching desktop launchers...${NC}"
 
-  patch_desktop_launchers_in "$HOME/.local/share/applications/wine/Programs"
-  patch_desktop_launchers_in "$(xdg_desktop_dir)"
+  lsu_update_launchers
 
-  local has_run="0"
-
-  if run command -v update-desktop-database; then
-    run update-desktop-database ~/.local/share/applications 2>/dev/null
-    has_run="1"
-  fi
-  if run command -v kbuildsycoca6; then
-    run kbuildsycoca6 --noincremental 2>/dev/null
-    has_run="1"
-  fi
-  if run command -v kbuildsycoca5; then
-    run kbuildsycoca5 --noincremental 2>/dev/null
-    has_run="1"
-  fi
-  if run command -v xdg-desktop-menu; then
-    run xdg-desktop-menu forceupdate 2>/dev/null
-    has_run="1"
-  fi
-
-  if [[ $has_run == "0" ]]; then
-    echo -e "${YELLOW}WARNING: Unsure how to refresh your desktop launcher entry cache, please do it manually.${NC}"
-  fi
-  
   echo -e "${CYAN}Desktop launchers successfully patched.${NC}"
 }
 
-xdg_desktop_dir() {
-  local desktop_dir
-  desktop_dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
-  if [[ -z "$desktop_dir" || "$desktop_dir" == "$HOME" ]]; then
-    desktop_dir="$HOME/Desktop"
+# ---------------------------------------------------------------------------
+# Modules: one script per program under modules/, listed in modules/index,
+# plus any the user drops into modules/local/. modules/example.sh documents
+# the contract. They are fetched into the install directory when first picked
+# and refreshed on every run after that, like the installer itself.
+# ---------------------------------------------------------------------------
+
+MODULES_DIR="${TARGET_DIR}/modules"
+LOCAL_MODULES_DIR="${MODULES_DIR}/local"
+
+# What an install from before modules existed could have put in the prefix.
+LEGACY_MODULES=(simhub crewchief pithouse)
+
+MOD_IDS=()          # menu order
+MOD_ORDER=()        # install order, dependencies first
+declare -A MOD_NAME=() MOD_DESC=() MOD_FILE=() MOD_LOCAL=()
+declare -A MOD_INSTALLED=() MOD_AVAILABLE=() MOD_DEPENDS=() MOD_MIN_WINE=()
+declare -A MOD_SELECTED=() MOD_RESOLVED=() MOD_OK=() MOD_RESULT=()
+MOD_FAILED=0
+SOURCE_IS_CLONE=0
+
+# Copies a file under modules/ into the install directory, from the clone this
+# installer runs from, or else from the repository on GitHub. A failed
+# download leaves any existing copy in place.
+stage_module_file() {
+  local path="$1" dest="${TARGET_DIR}/$1"
+
+  mkdir -p "$(dirname "$dest")"
+
+  if (( SOURCE_IS_CLONE )); then
+    [[ -f "${SCRIPT_DIR}/${path}" ]] || return 1
+    [[ "${SCRIPT_DIR}/${path}" -ef "$dest" ]] || cp "${SCRIPT_DIR}/${path}" "$dest"
+    return 0
   fi
-  printf '%s' "$desktop_dir"
+
+  if curl -sL --fail "${LSU_RAW_URL}/${path}" -o "${dest}.part"; then
+    mv -f "${dest}.part" "$dest"
+    return 0
+  fi
+
+  rm -f "${dest}.part"
+  return 1
 }
 
-# A launcher is ours if wine generated it against our prefix, or if an earlier
-# install already wrapped it. Matching wrapped entries as well means a reinstall
-# to a different TARGET_DIR repoints them.
-is_lsu_launcher() {
-  local launcher_path="$1"
+# Runs one verb of a module with the environment the contract promises. The
+# results land in MOD_OUT; the module's exit status is returned. Bash itself
+# exits 2 on a syntax error, so 2, 3 and 4 only count when the helper that
+# exits with them also recorded its status; anything else is a failure.
+module_run() {
+  local id="$1" verb="$2" rc=0 expected=""
 
-  grep -qE "^Exec=.*(${WINEPREFIX}|lsu-launch-wrapper)" "$launcher_path"
+  MOD_OUT="$(mktemp -p "$LSU_TMP" "module-${id}-${verb}.XXXXXX")"
+
+  env LSU_LIB="${TARGET_DIR}/lib/lsu-common.sh" \
+    LSU_TARGET_DIR="$TARGET_DIR" LSU_BINDIR="$bindir" LSU_VARDIR="$vardir" \
+    LSU_LOGDIR="$LSU_LOGDIR" WINEPREFIX="$WINEPREFIX" \
+    LSU_RESULT_FILE="$MOD_OUT" UNATTENDED="$UNATTENDED" DEBUG="$DEBUG" \
+    bash "${MOD_FILE[$id]}" "$verb" || rc=$?
+
+  case "$rc" in
+    2) expected=skipped ;;
+    3) expected=unsupported ;;
+    4) expected=unmet ;;
+  esac
+
+  if [[ -n "$expected" ]] && [[ "$(lsu_result_get "$MOD_OUT" status)" != "$expected" ]]; then
+    rc=1
+  fi
+
+  return "$rc"
 }
 
-# Wine writes Exec lines of the form:
-#   Exec=env "WINEPREFIX=<prefix>" wine "C:\\Program Files\\App\\App.exe"
-# Everything ahead of the Windows path is replaced by the launch wrapper so the
-# app runs under winehub.
-patch_desktop_launcher() {
-  local launcher_path="$1"
-
-  sed -i "s|^Exec=.* \\(\"\\)\\?C:|Exec=${bindir}/lsu-launch-wrapper \"C:|" "$launcher_path"
+# meta and status are meant to be quiet, so whatever they print goes to the log.
+module_query() {
+  module_run "$1" "$2" >> "${LSU_LOGDIR}/install.log" 2>&1
 }
 
-# Launchers are discovered by scanning rather than named individually, so every
-# entry the wine installers generate is covered.
-patch_desktop_launchers_in() {
-  local root="$1"
-  local launcher_path
+add_module() {
+  local id="$1" name="$2" desc="$3" file="$4" is_local="$5"
 
-  [[ -d "$root" ]] || return 0
+  if [[ ! "$id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo -e "${YELLOW}Ignoring module '${id}': ids are lower case letters, digits, - and _.${NC}"
+    return
+  fi
 
-  shopt -s globstar
+  [[ -n "${MOD_NAME[$id]:-}" ]] || MOD_IDS+=("$id")
+  MOD_NAME[$id]="${name:-$id}"
+  MOD_DESC[$id]="$desc"
+  MOD_FILE[$id]="$file"
+  MOD_LOCAL[$id]="$is_local"
+}
 
-  for launcher_path in "$root"/**/*.desktop; do
-    [[ -f "$launcher_path" ]] || continue
+load_module_list() {
+  local id name desc file
 
-    if is_lsu_launcher "$launcher_path"; then
-      patch_desktop_launcher "$launcher_path"
+  if is_lsu_clone "$SCRIPT_DIR"; then
+    SOURCE_IS_CLONE=1
+  fi
+
+  if ! stage_module_file modules/index; then
+    if [[ -f "${MODULES_DIR}/index" ]]; then
+      echo -e "${YELLOW}Unable to fetch the module list, using the one from the last run.${NC}"
+    else
+      echo -e "${YELLOW}Unable to fetch the module list, only local modules are available.${NC}"
+    fi
+  fi
+
+  if [[ -f "${MODULES_DIR}/index" ]]; then
+    while IFS=$'\t' read -r id name desc; do
+      [[ -z "$id" || "$id" == \#* ]] && continue
+      add_module "$id" "$name" "$desc" "${MODULES_DIR}/${id}.sh" 0
+    done < "${MODULES_DIR}/index"
+  fi
+
+  for file in "${LOCAL_MODULES_DIR}"/*.sh; do
+    [[ -f "$file" ]] || continue
+    id="$(basename "$file" .sh)"
+    MOD_FILE[$id]="$file"
+    if ! module_query "$id" meta; then
+      echo -e "${YELLOW}Ignoring local module ${file}: its meta verb failed, see ${LSU_LOGDIR}/install.log${NC}"
+      unset 'MOD_FILE[$id]'
+      continue
+    fi
+    add_module "$id" "$(lsu_result_get "$MOD_OUT" name)" \
+      "$(lsu_result_get "$MOD_OUT" description)" "$file" 1
+  done
+}
+
+# Modules fetched on an earlier run are refreshed, unless the installer update
+# was declined: newer modules may need the newer library. The first run after
+# the switch to modules has none yet, so it fetches the ones the old installer
+# handled, keeps those that turn out to be installed, and drops the rest.
+refresh_modules() {
+  local id have_any=0
+  local -a probed=()
+
+  for id in "${MOD_IDS[@]}"; do
+    (( MOD_LOCAL[$id] )) && continue
+    [[ -f "${MOD_FILE[$id]}" ]] || continue
+    have_any=1
+    (( INSTALLER_OUTDATED )) && continue
+    stage_module_file "modules/${id}.sh" \
+      || echo -e "${YELLOW}Unable to update the ${MOD_NAME[$id]} module, using the one from the last run.${NC}"
+  done
+
+  if (( ! have_any )) && [[ -d "${WINEPREFIX}/drive_c" ]]; then
+    for id in "${LEGACY_MODULES[@]}"; do
+      [[ -n "${MOD_NAME[$id]:-}" ]] || continue
+      stage_module_file "modules/${id}.sh" && probed+=("$id")
+    done
+  fi
+
+  query_module_statuses
+
+  for id in "${probed[@]}"; do
+    if [[ -z "${MOD_INSTALLED[$id]:-}" ]] \
+      && [[ ! "${SCRIPT_DIR}/modules/${id}.sh" -ef "${MOD_FILE[$id]}" ]]
+    then
+      rm -f "${MOD_FILE[$id]}"
     fi
   done
 }
+
+query_module_statuses() {
+  local id rc
+
+  echo -e "${CYAN}Checking installed modules...${NC}"
+
+  for id in "${MOD_IDS[@]}"; do
+    [[ -f "${MOD_FILE[$id]}" ]] || continue
+    rc=0
+    module_query "$id" status || rc=$?
+    if (( rc != 0 )); then
+      echo -e "${YELLOW}Unable to check ${MOD_NAME[$id]} (exit ${rc}), see ${LSU_LOGDIR}/install.log${NC}"
+      continue
+    fi
+    MOD_INSTALLED[$id]="$(lsu_result_get "$MOD_OUT" installed)"
+    MOD_AVAILABLE[$id]="$(lsu_result_get "$MOD_OUT" available)"
+  done
+}
+
+module_status_text() {
+  local installed="${MOD_INSTALLED[$1]:-}" available="${MOD_AVAILABLE[$1]:-}"
+
+  if [[ -z "$installed" ]]; then
+    echo "not installed"
+  elif [[ -z "$available" ]]; then
+    echo "${installed} installed"
+  elif [[ "$installed" == "$available" ]]; then
+    echo "${installed}, up to date"
+  else
+    echo "${installed} installed, ${available} available"
+  fi
+}
+
+module_menu() {
+  local reply choice id i mark name
+  local -a choices
+
+  while true; do
+    echo
+    echo -e "${CYAN}Programs to install or update:${NC}"
+    i=0
+    for id in "${MOD_IDS[@]}"; do
+      i=$(( i + 1 ))
+      mark=" "
+      [[ -n "${MOD_SELECTED[$id]:-}" ]] && mark="x"
+      name="${MOD_NAME[$id]}"
+      (( MOD_LOCAL[$id] )) && name+=" (local)"
+      printf "  %2d) [%s] %-24s %s\n" "$i" "$mark" "$name" "$(module_status_text "$id")"
+      [[ -n "${MOD_DESC[$id]}" ]] && printf "           %s\n" "${MOD_DESC[$id]}"
+    done
+
+    printf "${CYAN}"
+    read -rp "Numbers to toggle (e.g. 1 3), a for all, n for none, Enter to continue: " reply
+    printf "${NC}"
+
+    case "$reply" in
+      "") return ;;
+      [Aa]) for id in "${MOD_IDS[@]}"; do MOD_SELECTED[$id]=1; done ;;
+      [Nn]) MOD_SELECTED=() ;;
+      *)
+        read -ra choices <<< "${reply//,/ }"
+        for choice in "${choices[@]}"; do
+          if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#MOD_IDS[@]} )); then
+            id="${MOD_IDS[$(( choice - 1 ))]}"
+            if [[ -n "${MOD_SELECTED[$id]:-}" ]]; then
+              unset 'MOD_SELECTED[$id]'
+            else
+              MOD_SELECTED[$id]=1
+            fi
+          else
+            echo -e "${YELLOW}Ignoring '${choice}', pick a number from 1 to ${#MOD_IDS[@]}.${NC}"
+          fi
+        done
+        ;;
+    esac
+  done
+}
+
+# --modules picks exactly what it names. Otherwise what is installed starts
+# selected, and an interactive run gets the menu to change that.
+select_modules() {
+  local id
+  local -a ids
+
+  if (( MODULES_ARG_SET )); then
+    [[ "$MODULES_ARG" == "none" ]] && return
+    read -ra ids <<< "${MODULES_ARG//,/ }"
+    for id in "${ids[@]}"; do
+      if [[ -z "${MOD_NAME[$id]:-}" ]]; then
+        echo -e "${RED}Unknown module '${id}'. Available: ${MOD_IDS[*]:-none}${NC}"
+        exit 1
+      fi
+      MOD_SELECTED[$id]=1
+    done
+    return
+  fi
+
+  for id in "${MOD_IDS[@]}"; do
+    [[ -n "${MOD_INSTALLED[$id]:-}" ]] && MOD_SELECTED[$id]=1
+  done
+
+  if [[ "$UNATTENDED" != "1" ]] && (( ${#MOD_IDS[@]} )); then
+    module_menu
+  fi
+}
+
+# Fetches a picked module if this is its first run and reads its meta.
+prepare_module() {
+  local id="$1" api
+
+  if [[ ! -f "${MOD_FILE[$id]}" ]] && ! stage_module_file "modules/${id}.sh"; then
+    MOD_RESULT[$id]="failed: unable to download modules/${id}.sh"
+    return 1
+  fi
+
+  if ! module_query "$id" meta; then
+    MOD_RESULT[$id]="failed: its meta verb failed, see ${LSU_LOGDIR}/install.log"
+    return 1
+  fi
+
+  if [[ "$(lsu_result_get "$MOD_OUT" id)" != "$id" ]]; then
+    MOD_RESULT[$id]="failed: ${MOD_FILE[$id]} declares id '$(lsu_result_get "$MOD_OUT" id)'"
+    return 1
+  fi
+
+  api="$(lsu_result_get "$MOD_OUT" api)"
+  if [[ ! "$api" =~ ^[0-9]+$ ]] || (( api > LSU_API )); then
+    MOD_RESULT[$id]="skipped: needs a newer install.sh"
+    return 1
+  fi
+
+  MOD_DEPENDS[$id]="$(lsu_result_get "$MOD_OUT" depends)"
+  MOD_MIN_WINE[$id]="$(lsu_result_get "$MOD_OUT" min_wine)"
+}
+
+# Depth first, so each module lands in MOD_ORDER after what it depends on.
+# Returns 1 when the module cannot be installed, which its dependents inherit.
+resolve_module() {
+  local id="$1" from="$2" dep
+  local -a deps
+
+  case "${MOD_RESOLVED[$id]:-}" in
+    ok) return 0 ;;
+    failed) return 1 ;;
+    visiting)
+      echo -e "${RED}Module dependency loop between ${from} and ${id}.${NC}"
+      return 1
+      ;;
+  esac
+
+  if [[ -z "${MOD_NAME[$id]:-}" ]]; then
+    echo -e "${RED}${MOD_NAME[$from]} depends on '${id}', which is not a known module.${NC}"
+    return 1
+  fi
+
+  MOD_RESOLVED[$id]=visiting
+
+  if ! prepare_module "$id"; then
+    MOD_RESOLVED[$id]=failed
+    return 1
+  fi
+
+  read -ra deps <<< "${MOD_DEPENDS[$id]//,/ }"
+  for dep in "${deps[@]}"; do
+    if ! resolve_module "$dep" "$id"; then
+      MOD_RESULT[$id]="${MOD_RESULT[$id]:-skipped: needs ${MOD_NAME[$dep]:-$dep}}"
+      MOD_RESOLVED[$id]=failed
+      return 1
+    fi
+  done
+
+  MOD_RESOLVED[$id]=ok
+  MOD_SELECTED[$id]=1
+  MOD_ORDER+=("$id")
+}
+
+resolve_modules() {
+  local id
+
+  for id in "${MOD_IDS[@]}"; do
+    [[ -n "${MOD_SELECTED[$id]:-}" ]] || continue
+    resolve_module "$id" "" || unset 'MOD_SELECTED[$id]'
+  done
+}
+
+# Checked against the Wine about to be installed, so a module that needs a
+# newer one can still have it this run: on the release channel the user is
+# offered the prerelease channel when that would do.
+check_module_wine_requirements() {
+  local id min target rc
+
+  [[ "$LSU_WINE_VERSION" == "latest" ]] && lookup_wine_tags
+
+  for id in "${MOD_ORDER[@]}"; do
+    min="${MOD_MIN_WINE[$id]:-}"
+    [[ -n "$min" ]] || continue
+
+    target="$(wine_target_version)"
+    [[ -n "$target" ]] || target="$(wine_installed_version)"
+
+    rc=0
+    lsu_wine_at_least "$target" "$min" || rc=$?
+    (( rc == 1 )) || continue
+
+    echo -e "${YELLOW}${MOD_NAME[$id]} needs Wine ${min} or newer, and this run would install ${target}.${NC}"
+
+    if [[ "$UNATTENDED" != "1" ]] && [[ "$LSU_WINE_VERSION" == "latest" ]] \
+      && [[ "$LSU_WINE_CHANNEL" == "release" ]] && [[ -n "$WINE_PRERELEASE_TAG" ]] \
+      && lsu_wine_at_least "$WINE_PRERELEASE_TAG" "$min" \
+      && confirm "Switch to the prerelease channel (${WINE_PRERELEASE_TAG})?" Y
+    then
+      LSU_WINE_CHANNEL=prerelease
+      conf_set LSU_WINE_CHANNEL "$LSU_WINE_CHANNEL"
+      continue
+    fi
+
+    echo -e "${YELLOW}Skipping ${MOD_NAME[$id]}.${NC}"
+    MOD_RESULT[$id]="skipped: needs Wine ${min} or newer"
+    unset 'MOD_SELECTED[$id]'
+  done
+}
+
+# Results go in MOD_RESULT for the summary. A module whose dependency did not
+# end up installed is skipped.
+run_modules() {
+  local id dep rc previous version message blocked
+  local -a deps
+
+  for id in "${MOD_ORDER[@]}"; do
+    [[ -n "${MOD_SELECTED[$id]:-}" ]] || continue
+
+    blocked=""
+    read -ra deps <<< "${MOD_DEPENDS[$id]//,/ }"
+    for dep in "${deps[@]}"; do
+      if [[ -z "${MOD_OK[$dep]:-}" ]]; then
+        blocked="$dep"
+        break
+      fi
+    done
+    if [[ -n "$blocked" ]]; then
+      MOD_RESULT[$id]="skipped: needs ${MOD_NAME[$blocked]}"
+      continue
+    fi
+
+    echo
+    echo -e "${MAGENTA}== ${MOD_NAME[$id]} ==${NC}"
+
+    rc=0
+    module_run "$id" install || rc=$?
+
+    previous="${MOD_INSTALLED[$id]:-}"
+    version="$(lsu_result_get "$MOD_OUT" version)"
+    message="$(lsu_result_get "$MOD_OUT" message)"
+
+    case "$rc" in
+      0)
+        MOD_OK[$id]=1
+        if [[ -z "$previous" ]]; then
+          MOD_RESULT[$id]="installed ${version}"
+        elif [[ -n "$version" ]] && [[ "$version" != "$previous" ]]; then
+          MOD_RESULT[$id]="updated ${previous} -> ${version}"
+        else
+          MOD_RESULT[$id]="reinstalled ${version:-$previous}"
+        fi
+        ;;
+      2)
+        [[ -n "$previous" ]] && MOD_OK[$id]=1
+        MOD_RESULT[$id]="skipped${previous:+, ${previous} installed}"
+        ;;
+      3)
+        MOD_RESULT[$id]="skipped: the module cannot install"
+        ;;
+      4)
+        MOD_RESULT[$id]="skipped: ${message:-a requirement is not met}"
+        ;;
+      *)
+        MOD_RESULT[$id]="failed${message:+: ${message}}"
+        MOD_FAILED=1
+        ;;
+    esac
+  done
+}
+
+fixup_modules() {
+  local id rc
+
+  for id in "${MOD_IDS[@]}"; do
+    [[ -f "${MOD_FILE[$id]}" ]] || continue
+    rc=0
+    module_run "$id" fixup || rc=$?
+    case "$rc" in
+      0|2|3) ;;
+      *) echo -e "${YELLOW}${MOD_NAME[$id]} could not repair its launchers (exit ${rc}), see ${LSU_LOGDIR}/install.log${NC}" ;;
+    esac
+  done
+}
+
+print_summary() {
+  local id colour
+
+  echo
+  echo -e "${CYAN}Summary:${NC}"
+  printf "  %-24s %s\n" "Wine (sangria)" "$(wine_installed_version)"
+  printf "  %-24s %s\n" "Winecarte" "$(winecarte_installed_version)"
+
+  for id in "${MOD_IDS[@]}"; do
+    [[ -n "${MOD_RESULT[$id]:-}" ]] || continue
+    case "${MOD_RESULT[$id]}" in
+      failed*) colour="$RED" ;;
+      skipped*) colour="$YELLOW" ;;
+      *) colour="$GREEN" ;;
+    esac
+    printf "  %-24s ${colour}%s${NC}\n" "${MOD_NAME[$id]}" "${MOD_RESULT[$id]}"
+  done
+}
+
+choose_wine_channel
+
+load_module_list
+refresh_modules
+select_modules
+resolve_modules
+check_module_wine_requirements
 
 check_wine
 
@@ -1320,16 +1583,20 @@ check_tools
 
 check_prefix
 
-check_simhub
-
-check_crewchief
-
 check_winecarte
-
-postinstall_winecarte
 
 install_launch_wrapper
 
 install_hidraw_device
 
+run_modules
+
 fix_desktop_launchers
+
+fixup_modules
+
+postinstall_winecarte
+
+print_summary
+
+exit "$MOD_FAILED"
