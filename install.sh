@@ -998,6 +998,153 @@ Re-run this script in future to repair all desktop launcher entries in the prefi
 "
 }
 
+install_keybridge() {
+  if ! command -v ydotool >/dev/null 2>&1 || ! command -v ydotoold >/dev/null 2>&1; then
+    echo -e "${YELLOW}ydotool not found, skipping Wayland keyboard bridge (KeyBridge).${NC}"
+    return 0
+  fi
+
+  local csc="${WINEPREFIX}/drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+  if [[ ! -f "$csc" ]]; then
+    echo -e "${YELLOW}.NET 4.8 compiler not found, skipping KeyBridge.${NC}"
+    return 0
+  fi
+
+  echo -e "${CYAN}Installing Wayland keyboard bridge (KeyBridge)...${NC}"
+  local workdir
+  workdir=$(mktemp -d)
+
+  cat > "${workdir}/KeyBridge.cs" << 'EOF'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+class KeyBridge {
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYDOWN = 0x0104;
+    private const int WM_SYSKEYUP = 0x0105;
+    private const uint LLKHF_INJECTED = 0x00000010;
+    private const uint LLKHF_EXTENDED = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KBDLLHOOKSTRUCT {
+        public uint vkCode;
+        public uint scanCode;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+    private static LowLevelKeyboardProc _proc = HookCallback;
+    private static IntPtr _hookID = IntPtr.Zero;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    static void Main() {
+        using (Process curProcess = Process.GetCurrentProcess())
+        using (ProcessModule curModule = curProcess.MainModule) {
+            _hookID = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
+        }
+        Application.Run();
+        UnhookWindowsHookEx(_hookID);
+    }
+
+    private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
+        if (nCode >= 0) {
+            KBDLLHOOKSTRUCT info = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            bool isInjected = (info.flags & LLKHF_INJECTED) != 0;
+            bool isExtended = (info.flags & LLKHF_EXTENDED) != 0;
+
+            if (isInjected && info.scanCode > 0) {
+                int msg = wParam.ToInt32();
+                int state = -1;
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) state = 1;
+                else if (msg == WM_KEYUP || msg == WM_SYSKEYUP) state = 0;
+
+                if (state != -1) {
+                    uint linuxCode = MapScanCode(info.scanCode, isExtended);
+                    SendToYdotool(linuxCode, state);
+                }
+            }
+        }
+        return CallNextHookEx(_hookID, nCode, wParam, lParam);
+    }
+
+    private static uint MapScanCode(uint sc, bool ext) {
+        if (!ext) return sc;
+        switch (sc) {
+            case 0x1C: return 96;  // KP Enter
+            case 0x1D: return 97;  // Right Ctrl
+            case 0x35: return 98;  // KP Slash
+            case 0x38: return 100; // Right Alt (AltGr)
+            case 0x47: return 102; // Home
+            case 0x48: return 103; // Up Arrow
+            case 0x49: return 104; // Page Up
+            case 0x4B: return 105; // Left Arrow
+            case 0x4D: return 106; // Right Arrow
+            case 0x4F: return 107; // End
+            case 0x50: return 108; // Down Arrow
+            case 0x51: return 109; // Page Down
+            case 0x52: return 110; // Insert
+            case 0x53: return 111; // Delete
+            default: return sc;
+        }
+    }
+
+    private static void SendToYdotool(uint code, int state) {
+        try {
+            var psi = new ProcessStartInfo {
+                FileName = @"Z:\usr\bin\ydotool",
+                Arguments = string.Format("key {0}:{1}", code, state),
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            Process.Start(psi);
+        } catch {}
+    }
+}
+EOF
+
+  wine 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' \
+    /nologo /r:System.Windows.Forms.dll \
+    /out:"Z:${bindir}/KeyBridge.exe" \
+    "Z:${workdir}/KeyBridge.cs" >> "${LSU_LOGDIR}/install.log" 2>&1
+
+  rm -rf "${workdir}"
+
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$HOME/.config/systemd/user/ydotoold.service" << 'EOF'
+[Unit]
+Description=ydotool daemon (user)
+
+[Service]
+ExecStart=/usr/bin/ydotoold
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload >> "${LSU_LOGDIR}/install.log" 2>&1 || true
+  systemctl --user enable --now ydotoold.service >> "${LSU_LOGDIR}/install.log" 2>&1 || true
+
+  echo -e "${GREEN}KeyBridge installed successfully.${NC}"
+}
+
 install_launch_wrapper() {
   mkdir -p "${bindir}"
 
@@ -1044,12 +1191,19 @@ export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
 "${TARGET_DIR}/bin/winehub" > "${LSU_LOGDIR}/winehub.log" 2>&1 &
 echo \$! > "\$WINEHUB_PIDFILE"
 
+if [[ -f "${bindir}/KeyBridge.exe" ]]; then
+  wine "Z:${bindir}/KeyBridge.exe" > "${LSU_LOGDIR}/keybridge.log" 2>&1 &
+  keybridge_pid=\$!
+fi
+
 sleep 2
 wineserver -w
 
+[ -n "\${keybridge_pid:-}" ] && kill "\$keybridge_pid" 2>/dev/null
 kill "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null
 rm -f "\$WINEHUB_PIDFILE"
 EOF
+
   chmod +x "${bindir}/lsu-winehub-manager"
 }
 
@@ -1327,6 +1481,8 @@ check_crewchief
 check_winecarte
 
 postinstall_winecarte
+
+install_keybridge
 
 install_launch_wrapper
 
