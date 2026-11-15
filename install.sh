@@ -1196,14 +1196,20 @@ export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
 echo \$! > "\$WINEHUB_PIDFILE"
 
 if [[ -f "${bindir}/KeyBridge.exe" ]]; then
+  sleep 3
   wine "Z:${bindir}/KeyBridge.exe" > "${LSU_LOGDIR}/keybridge.log" 2>&1 &
   keybridge_pid=\$!
+
+  while pgrep -f "SimHubWPF.exe" >/dev/null 2>&1; do
+    sleep 2
+  done
+
+  kill "\$keybridge_pid" 2>/dev/null || true
+else
+  sleep 2
+  wineserver -w
 fi
 
-sleep 2
-wineserver -w
-
-[ -n "\${keybridge_pid:-}" ] && kill "\$keybridge_pid" 2>/dev/null
 kill "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null
 rm -f "\$WINEHUB_PIDFILE"
 EOF
