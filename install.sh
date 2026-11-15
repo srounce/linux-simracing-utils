@@ -998,6 +998,130 @@ Re-run this script in future to repair all desktop launcher entries in the prefi
 "
 }
 
+install_fs_telemetry() {
+  local csc="${WINEPREFIX}/drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+  local simhub_addons="${WINEPREFIX}/drive_c/Program Files (x86)/SimHub/_Addons/GamePlugins"
+
+  if [[ ! -f "$csc" ]] || [[ ! -d "$simhub_addons" ]]; then
+    return 0
+  fi
+
+  echo -e "${CYAN}Checking for Farming Simulator installations (FS19/FS22/FS25)...${NC}"
+  local workdir
+  workdir=$(mktemp -d)
+
+  cat > "${workdir}/FSPipeClient.cs" << 'EOF'
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Threading;
+
+class FSPipeClient {
+    static void Main(string[] args) {
+        if (args.Length == 0) return;
+        string bufPath = args[0];
+        long lastPos = 0;
+        byte[] buffer = new byte[65536];
+        while (true) {
+            try {
+                using (var pipe = new NamedPipeClientStream(".", "SHTelemetry", PipeDirection.Out)) {
+                    pipe.Connect(2000);
+                    while (pipe.IsConnected) {
+                        var fi = new FileInfo(bufPath);
+                        if (fi.Exists && fi.Length < lastPos) lastPos = 0;
+                        if (fi.Exists && fi.Length > lastPos) {
+                            using (var fs = new FileStream(bufPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                                fs.Seek(lastPos, SeekOrigin.Begin);
+                                int read;
+                                while ((read = fs.Read(buffer, 0, buffer.Length)) > 0) {
+                                    pipe.Write(buffer, 0, read);
+                                    pipe.Flush();
+                                }
+                                lastPos = fs.Position;
+                            }
+                        }
+                        Thread.Sleep(16);
+                    }
+                }
+            } catch {
+                Thread.Sleep(500);
+            }
+        }
+    }
+}
+EOF
+
+  local win_out win_src
+  win_out="$(winepath -w "${bindir}/FSPipeClient.exe")"
+  win_src="$(winepath -w "${workdir}/FSPipeClient.cs")"
+
+  wine 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' \
+    /nologo /out:"${win_out}" "${win_src}" >> "${LSU_LOGDIR}/install.log" 2>&1
+
+  rm -rf "${workdir}"
+
+  local pipes_list="${WINEPREFIX}/fs_pipes.list"
+  : > "${pipes_list}"
+
+  python3 - "$simhub_addons" "$pipes_list" << 'PYEOF'
+import os, re, sys, zipfile
+
+addons_dir, pipes_list = sys.argv[1], sys.argv[2]
+games = {
+    "787860": ("FarmingSimulator19", "FarmingSimulator2019"),
+    "1248130": ("FarmingSimulator22", "FarmingSimulator2022"),
+    "2300320": ("FarmingSimulator25", "FarmingSimulator2025"),
+}
+
+steam_roots = [
+    os.path.expanduser("~/.local/share/Steam"),
+    os.path.expanduser("~/.steam/steam"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.steam/steam"),
+]
+
+steam_libs = set()
+for base in steam_roots:
+    vdf = os.path.join(base, "steamapps", "libraryfolders.vdf")
+    if os.path.isfile(vdf):
+        steam_libs.add(os.path.realpath(base))
+        with open(vdf, "r", errors="replace") as f:
+            for m in re.finditer(r'"path"\s+"([^"]+)"', f.read()):
+                steam_libs.add(os.path.realpath(m.group(1)))
+
+found = []
+for lib in sorted(steam_libs):
+    for appid, (plugin_folder, docs_folder) in games.items():
+        src_zip = os.path.join(addons_dir, plugin_folder, "mods", "SHTelemetry.zip")
+        game_docs = os.path.join(
+            lib, "steamapps", "compatdata", appid,
+            "pfx", "drive_c", "users", "steamuser", "Documents", "My Games", docs_folder
+        )
+        if os.path.isfile(src_zip) and os.path.isdir(game_docs):
+            mods_dir = os.path.join(game_docs, "mods")
+            os.makedirs(mods_dir, exist_ok=True)
+            dst_zip = os.path.join(mods_dir, "SHTelemetry.zip")
+            win_buf = f"C:\\\\users\\\\steamuser\\\\Documents\\\\My Games\\\\{docs_folder}\\\\SHTelemetry.bin"
+            linux_buf = os.path.join(game_docs, "SHTelemetry.bin")
+
+            with zipfile.ZipFile(src_zip, "r") as zin, zipfile.ZipFile(dst_zip, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    data = zin.read(item.filename)
+                    if item.filename.endswith(".lua"):
+                        text = data.decode("utf-8", errors="replace")
+                        text = text.replace("\\\\\\\\.\\\\pipe\\\\SHTelemetry", win_buf)
+                        data = text.encode("utf-8")
+                    zout.writestr(item, data)
+
+            found.append(linux_buf)
+            print(f"Configured {docs_folder} telemetry bridge -> {dst_zip}")
+
+with open(pipes_list, "w") as out:
+    for p in found:
+        out.write(p + "\n")
+PYEOF
+}
+
 install_launch_wrapper() {
   mkdir -p "${bindir}"
 
@@ -1044,8 +1168,27 @@ export WINECARTE_WINE2LINUX_EXE="${TARGET_DIR}/bin/wine2linux.exe"
 "${TARGET_DIR}/bin/winehub" > "${LSU_LOGDIR}/winehub.log" 2>&1 &
 echo \$! > "\$WINEHUB_PIDFILE"
 
-sleep 2
-wineserver -w
+fs_pids=()
+if [[ -f "${bindir}/FSPipeClient.exe" ]] && [[ -s "${WINEPREFIX}/fs_pipes.list" ]]; then
+  while IFS= read -r buf_path; do
+    [[ -n "\$buf_path" ]] || continue
+    wine "Z:${bindir}/FSPipeClient.exe" "Z:\${buf_path}" > "${LSU_LOGDIR}/fs_telemetry.log" 2>&1 &
+    fs_pids+=(\$!)
+  done < "${WINEPREFIX}/fs_pipes.list"
+fi
+
+if [[ \${#fs_pids[@]} -gt 0 ]]; then
+  sleep 2
+  while pgrep -f "SimHubWPF.exe" >/dev/null 2>&1; do
+    sleep 2
+  done
+  for pid in "\${fs_pids[@]}"; do
+    kill "\$pid" 2>/dev/null || true
+  done
+else
+  sleep 2
+  wineserver -w
+fi
 
 kill "\$(cat \$WINEHUB_PIDFILE)" 2>/dev/null
 rm -f "\$WINEHUB_PIDFILE"
@@ -1327,6 +1470,8 @@ check_crewchief
 check_winecarte
 
 postinstall_winecarte
+
+install_fs_telemetry
 
 install_launch_wrapper
 
