@@ -1119,10 +1119,14 @@ class KeyBridge {
 }
 EOF
 
+  local win_out win_src
+  win_out="$(winepath -w "${bindir}/KeyBridge.exe")"
+  win_src="$(winepath -w "${workdir}/KeyBridge.cs")"
+
   wine 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe' \
     /nologo /r:System.Windows.Forms.dll \
-    /out:"Z:${bindir}/KeyBridge.exe" \
-    "Z:${workdir}/KeyBridge.cs" >> "${LSU_LOGDIR}/install.log" 2>&1
+    /out:"${win_out}" \
+    "${win_src}" >> "${LSU_LOGDIR}/install.log" 2>&1
 
   rm -rf "${workdir}"
 
