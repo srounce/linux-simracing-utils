@@ -54,12 +54,16 @@ module_install() {
     echo -e "${CYAN}Installing SimHub...${NC}"
   fi
 
+  # The release JSON goes to a file first: piping curl into grep -m1 lets grep
+  # close the pipe early, which fails curl with exit 23 under pipefail.
+  local release_json="${workdir}/release.json" url
   mkdir -p "$workdir"
-  curl -sL --fail "https://api.github.com/repos/${SIMHUB_REPO}/releases/latest" \
-    | grep -m1 "browser_download_url" \
-    | cut -d : -f 2,3 \
-    | tr -d \" \
-    | xargs curl -sL --fail > "${workdir}/simhub.zip"
+  curl -sL --fail -o "$release_json" "https://api.github.com/repos/${SIMHUB_REPO}/releases/latest" \
+    || lsu_fail "Could not fetch the SimHub release info from GitHub"
+  url="$(grep -m1 '"browser_download_url"' "$release_json" | cut -d '"' -f 4 || true)"
+  [[ -n "$url" ]] || lsu_fail "No SimHub download found in the latest GitHub release"
+  curl -sL --fail -o "${workdir}/simhub.zip" "$url" \
+    || lsu_fail "Download failed for SimHub: ${url}"
   unzip -q -d "${workdir}/simhub" "${workdir}/simhub.zip"
 
   # The registry is not read back here: Wine writes it out lazily, and
